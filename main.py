@@ -278,6 +278,7 @@ class AddVehicleStates(StatesGroup):
 class WaybillStates(StatesGroup):
     vehicle_selected = State()
     start_time = State()
+    initial_data_choice = State()  # Новое состояние для выбора начальных данных
     odo_start = State()
     fuel_start = State()
     end_time = State()
@@ -320,12 +321,11 @@ def get_vehicles_keyboard(vehicles: list) -> ReplyKeyboardMarkup:
     buttons.append([KeyboardButton(text="❌ Отмена")])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-def get_confirm_keyboard(odo_value: float, fuel_value: float) -> ReplyKeyboardMarkup:
-    """Клавиатура подтверждения данных"""
+def get_initial_data_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура для выбора начальных данных"""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=f"✅ Одометр: {odo_value:.0f} км")],
-            [KeyboardButton(text=f"✅ Топливо: {fuel_value:.2f} л")],
+            [KeyboardButton(text="✅ Использовать данные предыдущего дня")],
             [KeyboardButton(text="✏️ Ввести вручную")]
         ],
         resize_keyboard=True
@@ -604,7 +604,7 @@ async def vehicle_selected(message: Message, state: FSMContext):
                 f"<b>📅 За последние 7 дней:</b>\n"
                 f"🚗 Поездок: {stats['trips']}\n"
                 f"📏 Пробег: {stats['total_distance']:.0f} км\n"
-                f"⛽ Топлива: {stats['total_fuel']:.2f} л\n"
+                f"⛽ Топливо: {stats['total_fuel']:.2f} л\n"
                 f"📊 Средний расход: {avg_consumption:.2f} л/100км",
                 reply_markup=get_main_keyboard()
             )
@@ -623,18 +623,19 @@ async def vehicle_selected(message: Message, state: FSMContext):
         
         if last_waybill:
             await state.update_data(
-                suggested_odo=last_waybill['odo_end'],
-                suggested_fuel=last_waybill['fuel_end']
+                previous_odo=last_waybill['odo_end'],
+                previous_fuel=last_waybill['fuel_end'],
+                previous_date=last_waybill['date']
             )
             await message.answer(
                 f"🚗 Автомобиль: <b>{vehicle['number']}</b>\n\n"
                 f"📅 Последний путевой лист: {last_waybill['date']}\n"
-                f"🛣 Одометр: {last_waybill['odo_end']:.0f} км\n"
-                f"⛽ Остаток топлива: {last_waybill['fuel_end']:.2f} л\n\n"
-                f"Использовать эти значения?",
-                reply_markup=get_confirm_keyboard(last_waybill['odo_end'], last_waybill['fuel_end'])
+                f"🛣 Показания одометра на конец дня: {last_waybill['odo_end']:.0f} км\n"
+                f"⛽ Остаток топлива на конец дня: {last_waybill['fuel_end']:.2f} л\n\n"
+                f"<b>Использовать эти данные как начальные для нового дня?</b>",
+                reply_markup=get_initial_data_keyboard()
             )
-            await state.set_state(WaybillStates.vehicle_selected)
+            await state.set_state(WaybillStates.initial_data_choice)
         else:
             await message.answer(
                 f"🚗 Автомобиль: <b>{vehicle['number']}</b>\n\n"
@@ -644,36 +645,40 @@ async def vehicle_selected(message: Message, state: FSMContext):
             await state.set_state(WaybillStates.start_time)
 
 # ════════════════════════════════════════════════════════════════════════════
-# 📝 ПРОЦЕСС ЗАПОЛНЕНИЯ ПУТЕВОГО ЛИСТА
+# 🔄 ВЫБОР НАЧАЛЬНЫХ ДАННЫХ
 # ════════════════════════════════════════════════════════════════════════════
 
-@router.message(WaybillStates.vehicle_selected)
-async def handle_previous_data(message: Message, state: FSMContext):
-    """Обработка выбора использования предыдущих данных"""
+@router.message(WaybillStates.initial_data_choice)
+async def handle_initial_data_choice(message: Message, state: FSMContext):
+    """Обработка выбора начальных данных"""
     data = await state.get_data()
     
-    if message.text.startswith("✅ Одометр"):
-        await state.update_data(odo_start=data['suggested_odo'])
-        await message.answer(
-            f"✅ Одометр: {data['suggested_odo']:.0f} км\n\n"
-            f"⛽ Остаток топлива при выезде:",
-            reply_markup=ReplyKeyboardRemove()
+    if message.text == "✅ Использовать данные предыдущего дня":
+        # Используем данные из предыдущего дня
+        await state.update_data(
+            odo_start=data['previous_odo'],
+            fuel_start=data['previous_fuel']
         )
-        await state.set_state(WaybillStates.fuel_start)
-    elif message.text.startswith("✅ Топливо"):
-        await state.update_data(fuel_start=data['suggested_fuel'])
+        
         await message.answer(
-            f"✅ Топливо: {data['suggested_fuel']:.2f} л\n\n"
-            f"🛣 Показания одометра на начало дня:",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        await state.set_state(WaybillStates.odo_start)
-    else:
-        await message.answer(
-            "🕒 Введите время выпуска на линию (ЧЧ:ММ):",
+            f"✅ Использованы данные от {data['previous_date']}:\n"
+            f"🛣 Показания одометра на начало дня: {data['previous_odo']:.0f} км\n"
+            f"⛽ Остаток топлива при выезде: {data['previous_fuel']:.2f} л\n\n"
+            f"🕒 Введите время выпуска на линию (ЧЧ:ММ):",
             reply_markup=ReplyKeyboardRemove()
         )
         await state.set_state(WaybillStates.start_time)
+    else:
+        # Ввод данных вручную
+        await message.answer(
+            "✏️ Введите показания одометра на начало дня (км):",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await state.set_state(WaybillStates.odo_start)
+
+# ════════════════════════════════════════════════════════════════════════════
+# 📝 ПРОЦЕСС ЗАПОЛНЕНИЯ ПУТЕВОГО ЛИСТА
+# ════════════════════════════════════════════════════════════════════════════
 
 @router.message(WaybillStates.start_time)
 async def start_time_input(message: Message, state: FSMContext):
@@ -683,8 +688,21 @@ async def start_time_input(message: Message, state: FSMContext):
         return
     
     await state.update_data(start_time=message.text)
-    await message.answer("🛣 Показания одометра на начало дня:")
-    await state.set_state(WaybillStates.odo_start)
+    data = await state.get_data()
+    
+    # Проверяем, есть ли уже начальные данные (одометр и топливо)
+    if 'odo_start' in data and 'fuel_start' in data:
+        # Данные уже введены (из предыдущего дня или вручную), переходим к вводу времени возвращения
+        await message.answer("🕓 Введите время возвращения с линии (ЧЧ:ММ):")
+        await state.set_state(WaybillStates.end_time)
+    else:
+        # Нужно ввести начальные данные
+        if 'odo_start' not in data:
+            await message.answer("🛣 Введите показания одометра на начало дня (км):")
+            await state.set_state(WaybillStates.odo_start)
+        elif 'fuel_start' not in data:
+            await message.answer("⛽ Введите остаток топлива при выезде (л):")
+            await state.set_state(WaybillStates.fuel_start)
 
 @router.message(WaybillStates.odo_start)
 async def odo_start_input(message: Message, state: FSMContext):
@@ -694,8 +712,16 @@ async def odo_start_input(message: Message, state: FSMContext):
         return
     
     await state.update_data(odo_start=float(message.text))
-    await message.answer("⛽ Остаток топлива при выезде:")
-    await state.set_state(WaybillStates.fuel_start)
+    data = await state.get_data()
+    
+    # Проверяем, есть ли время начала
+    if 'start_time' not in data:
+        await message.answer("🕒 Введите время выпуска на линию (ЧЧ:ММ):")
+        await state.set_state(WaybillStates.start_time)
+    else:
+        # Время уже введено, запрашиваем топливо
+        await message.answer("⛽ Введите остаток топлива при выезде (л):")
+        await state.set_state(WaybillStates.fuel_start)
 
 @router.message(WaybillStates.fuel_start)
 async def fuel_start_input(message: Message, state: FSMContext):
@@ -705,8 +731,16 @@ async def fuel_start_input(message: Message, state: FSMContext):
         return
     
     await state.update_data(fuel_start=float(message.text))
-    await message.answer("🕓 Время возвращения с линии (ЧЧ:ММ):")
-    await state.set_state(WaybillStates.end_time)
+    data = await state.get_data()
+    
+    # Проверяем, есть ли время начала
+    if 'start_time' not in data:
+        await message.answer("🕒 Введите время выпуска на линию (ЧЧ:ММ):")
+        await state.set_state(WaybillStates.start_time)
+    else:
+        # Все начальные данные есть, переходим к времени возвращения
+        await message.answer("🕓 Введите время возвращения с линии (ЧЧ:ММ):")
+        await state.set_state(WaybillStates.end_time)
 
 @router.message(WaybillStates.end_time)
 async def end_time_input(message: Message, state: FSMContext):
@@ -721,7 +755,7 @@ async def end_time_input(message: Message, state: FSMContext):
     
     await message.answer(
         f"⏱ Всего в наряде: <b>{hours} ч</b>\n\n"
-        "🚗 Показания одометра на конец дня:"
+        "🚗 Введите показания одометра на конец дня (км):"
     )
     await state.set_state(WaybillStates.odo_end)
 
@@ -734,16 +768,18 @@ async def odo_end_input(message: Message, state: FSMContext):
     
     data = await state.get_data()
     odo_end = float(message.text)
-    distance = odo_end - data["odo_start"]
+    odo_start = data.get('odo_start', 0)
+    distance = odo_end - odo_start
     
     if distance < 0:
         await message.answer("❌ Показания одометра не могут быть меньше начальных!")
         return
     
     await state.update_data(odo_end=odo_end, distance=distance)
+    
     await message.answer(
         f"📏 Пробег за день: <b>{distance:.0f} км</b>\n\n"
-        "⚠️ Перерасход топлива (л) или пропустить:",
+        "⚠️ Введите перерасход топлива (л), если есть, или 0:",
         reply_markup=get_skip_keyboard()
     )
     await state.set_state(WaybillStates.overuse)
@@ -752,15 +788,17 @@ async def odo_end_input(message: Message, state: FSMContext):
 async def overuse_input(message: Message, state: FSMContext):
     """Ввод перерасхода"""
     if message.text == "⏭ Пропустить":
-        await state.update_data(overuse=0)
+        overuse = 0
     elif not validate_number(message.text):
         await message.answer("❌ Введите корректное число или нажмите 'Пропустить'!")
         return
     else:
-        await state.update_data(overuse=float(message.text))
+        overuse = float(message.text)
+    
+    await state.update_data(overuse=overuse)
     
     await message.answer(
-        "💰 Экономия топлива (л) или пропустить:",
+        "💰 Введите экономию топлива (л), если есть, или 0:",
         reply_markup=get_skip_keyboard()
     )
     await state.set_state(WaybillStates.economy)
@@ -779,9 +817,20 @@ async def economy_input(message: Message, state: FSMContext):
     await state.update_data(economy=economy)
     data = await state.get_data()
     
+    # Проверяем все необходимые данные
+    required_fields = ['odo_start', 'odo_end', 'fuel_start', 'start_time', 'end_time', 'fuel_rate']
+    for field in required_fields:
+        if field not in data:
+            await message.answer(f"❌ Отсутствует поле {field}. Начните заново.", reply_markup=get_main_keyboard())
+            await state.clear()
+            return
+    
     # Расчеты
-    fuel_norm = data['distance'] * data['fuel_rate']
-    fuel_actual = fuel_norm - data['economy'] + data['overuse']
+    distance = data['odo_end'] - data['odo_start']
+    fuel_norm = distance * data['fuel_rate']
+    overuse = data.get('overuse', 0)
+    economy = data.get('economy', 0)
+    fuel_actual = fuel_norm - economy + overuse
     fuel_end = data['fuel_start'] - fuel_actual
     
     # Сохранение в БД
@@ -790,16 +839,16 @@ async def economy_input(message: Message, state: FSMContext):
         'user_id': data['user_id'],
         'start_time': data['start_time'],
         'end_time': data['end_time'],
-        'hours': data['hours'],
+        'hours': data.get('hours', 0),
         'odo_start': data['odo_start'],
         'odo_end': data['odo_end'],
-        'distance': data['distance'],
+        'distance': distance,
         'fuel_start': data['fuel_start'],
         'fuel_end': fuel_end,
         'fuel_norm': fuel_norm,
         'fuel_actual': fuel_actual,
-        'overuse': data['overuse'],
-        'economy': data['economy'],
+        'overuse': overuse,
+        'economy': economy,
         'fuel_rate': data['fuel_rate']
     }
     
@@ -811,27 +860,30 @@ async def economy_input(message: Message, state: FSMContext):
 ✅ <b>ПУТЕВОЙ ЛИСТ #{waybill_id} СОХРАНЕН</b>
 ━━━━━━━━━━━━━━━━━━━━━
 
-🚗 <b>Автомобиль:</b> {data['vehicle_number']}
+🚗 <b>Автомобиль:</b> {data.get('vehicle_number', 'Не указан')}
 📅 <b>Дата:</b> {datetime.now().strftime('%Y-%m-%d')}
 
 <b>📋 ВВЕДЕННЫЕ ДАННЫЕ:</b>
 🕒 Время выезда: {data['start_time']}
 🕓 Время возвращения: {data['end_time']}
-⏱ Всего в наряде: {data['hours']} ч
+⏱ Всего в наряде: {data.get('hours', 0):.1f} ч
 🛣 Одометр начало: {data['odo_start']:.0f} км
 🛣 Одометр конец: {data['odo_end']:.0f} км
 ⛽ Топливо начало: {data['fuel_start']:.2f} л
-📈 Перерасход: {data['overuse']:.2f} л
-📉 Экономия: {data['economy']:.2f} л
+📈 Перерасход: {overuse:.2f} л
+📉 Экономия: {economy:.2f} л
 
 <b>📊 РАСЧЕТНЫЕ ПОКАЗАТЕЛИ:</b>
-📏 Пробег за день: {data['distance']:.0f} км
+📏 Пробег за день: {distance:.0f} км
 📈 Расход по норме: {fuel_norm:.2f} л
 📉 Фактический расход: {fuel_actual:.2f} л
 ⛽ Остаток топлива: {fuel_end:.2f} л
 ━━━━━━━━━━━━━━━━━━━━━
 
 ✅ Данные успешно сохранены!
+<b>Для следующего дня будут доступны:</b>
+🛣 Показания одометра: {data['odo_end']:.0f} км
+⛽ Остаток топлива: {fuel_end:.2f} л
         """
         
         await message.answer(report, reply_markup=get_main_keyboard())
