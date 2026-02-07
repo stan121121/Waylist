@@ -77,12 +77,13 @@ def init_database():
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Таблица автомобилей
+        # Таблица автомобилей (ДОБАВЛЕНО ПОЛЕ ДЛЯ ПРОСТОЯ)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS vehicles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 number TEXT UNIQUE NOT NULL,
                 fuel_rate REAL NOT NULL,
+                idle_rate REAL DEFAULT 2.0,  -- НОВОЕ ПОЛЕ: перерасход в час простоя (л/ч)
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -106,6 +107,8 @@ def init_database():
                 fuel_norm REAL,
                 fuel_actual REAL,
                 overuse REAL DEFAULT 0,
+                overuse_hours REAL DEFAULT 0,  -- НОВОЕ ПОЛЕ: часы простоя для расчета перерасхода
+                overuse_calculated INTEGER DEFAULT 0,  -- НОВОЕ ПОЛЕ: флаг расчета перерасхода по простому
                 economy REAL DEFAULT 0,
                 fuel_rate REAL,
                 fuel_end_manual INTEGER DEFAULT 0,  -- НОВОЕ: флаг ручного ввода
@@ -130,19 +133,19 @@ def init_database():
 
 class Database:
     @staticmethod
-    def add_vehicle(number: str, fuel_rate: float) -> Optional[int]:
-        """Добавление нового автомобиля"""
+    def add_vehicle(number: str, fuel_rate: float, idle_rate: float = 2.0) -> Optional[int]:
+        """Добавление нового автомобиля (ДОБАВЛЕН ПРОСТОЙ)"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO vehicles (number, fuel_rate) VALUES (?, ?)",
-                (number.upper(), fuel_rate)
+                "INSERT INTO vehicles (number, fuel_rate, idle_rate) VALUES (?, ?, ?)",
+                (number.upper(), fuel_rate, idle_rate)
             )
             conn.commit()
             vehicle_id = cursor.lastrowid
             conn.close()
-            logger.info(f"✅ Добавлен автомобиль {number}")
+            logger.info(f"✅ Добавлен автомобиль {number}, простой: {idle_rate} л/ч")
             return vehicle_id
         except sqlite3.IntegrityError:
             logger.warning(f"⚠️ Автомобиль {number} уже существует")
@@ -157,7 +160,7 @@ class Database:
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT id, number, fuel_rate FROM vehicles ORDER BY number")
+            cursor.execute("SELECT id, number, fuel_rate, idle_rate FROM vehicles ORDER BY number")
             vehicles = cursor.fetchall()
             conn.close()
             return vehicles
@@ -171,7 +174,7 @@ class Database:
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT id, number, fuel_rate FROM vehicles WHERE id = ?", (vehicle_id,))
+            cursor.execute("SELECT id, number, fuel_rate, idle_rate FROM vehicles WHERE id = ?", (vehicle_id,))
             vehicle = cursor.fetchone()
             conn.close()
             return vehicle
@@ -209,8 +212,9 @@ class Database:
                 INSERT INTO waybills 
                 (vehicle_id, user_id, date, start_time, end_time, total_hours, 
                  odo_start, odo_end, distance, fuel_start, fuel_end, fuel_refuel,
-                 fuel_norm, fuel_actual, overuse, economy, fuel_rate, fuel_end_manual)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 fuel_norm, fuel_actual, overuse, overuse_hours, overuse_calculated, 
+                 economy, fuel_rate, fuel_end_manual)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 data['vehicle_id'],
                 data['user_id'],
@@ -227,6 +231,8 @@ class Database:
                 data.get('fuel_norm'),
                 data.get('fuel_actual'),
                 data.get('overuse', 0),
+                data.get('overuse_hours', 0),
+                data.get('overuse_calculated', 0),
                 data.get('economy', 0),
                 data.get('fuel_rate'),
                 data.get('fuel_end_manual', 0)
@@ -252,6 +258,7 @@ class Database:
                     SUM(distance) as total_distance,
                     SUM(fuel_actual) as total_fuel,
                     SUM(fuel_refuel) as total_refuel,
+                    SUM(overuse_hours) as total_idle_hours,
                     AVG(fuel_actual/distance*100) as avg_consumption
                 FROM waybills 
                 WHERE vehicle_id = ? AND user_id = ? 
@@ -271,6 +278,7 @@ class Database:
 class AddVehicleStates(StatesGroup):
     number = State()
     fuel_rate = State()
+    idle_rate = State()  # НОВОЕ: состояние для ввода простоя
 
 class WaybillStates(StatesGroup):
     vehicle_selected = State()
@@ -280,7 +288,9 @@ class WaybillStates(StatesGroup):
     fuel_start = State()
     end_time = State()
     odo_end = State()
-    overuse = State()
+    overuse_choice = State()  # НОВОЕ: выбор способа учета перерасхода
+    overuse_hours = State()   # НОВОЕ: ввод часов простоя
+    overuse_manual = State()  # НОВОЕ: ручной ввод перерасхода
     economy = State()
     fuel_end_choice = State()   # НОВОЕ: выбор способа ввода остатка топлива
     fuel_refuel = State()       # НОВОЕ: заправленное топливо
@@ -317,7 +327,7 @@ def get_vehicles_keyboard(vehicles: list) -> ReplyKeyboardMarkup:
     """Клавиатура выбора автомобиля"""
     buttons = []
     for vehicle in vehicles:
-        buttons.append([KeyboardButton(text=f"🚙 {vehicle['number']} ({vehicle['fuel_rate']} л/км)")])
+        buttons.append([KeyboardButton(text=f"🚙 {vehicle['number']} ({vehicle['fuel_rate']} л/км, {vehicle['idle_rate']} л/ч)")])
     buttons.append([KeyboardButton(text="❌ Отмена")])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
@@ -327,6 +337,17 @@ def get_initial_data_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="✅ Использовать данные предыдущего дня")],
             [KeyboardButton(text="✏️ Ввести вручную")]
+        ],
+        resize_keyboard=True
+    )
+
+def get_overuse_choice_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура для выбора способа учета перерасхода"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🕒 Рассчитать по простому")],
+            [KeyboardButton(text="✏️ Ввести перерасход вручную")],
+            [KeyboardButton(text="✅ Нет перерасхода")]
         ],
         resize_keyboard=True
     )
@@ -389,10 +410,12 @@ async def cmd_start(message: Message, state: FSMContext):
     logger.info(f"🚀 Пользователь {message.from_user.id} запустил бота")
     
     await message.answer(
-        "<b>🚛 Система учета путевых листов v2.0</b>\n\n"
+        "<b>🚛 Система учета путевых листов v2.1</b>\n\n"
         "Бот помогает вести учет путевых листов, "
         "контролировать расход топлива и пробег.\n\n"
-        "<b>НОВОЕ в версии 2.0:</b>\n"
+        "<b>НОВОЕ в версии 2.1:</b>\n"
+        "• Учет простоя автомобиля\n"
+        "• Расчет перерасхода по часам простоя\n"
         "• Ручной ввод остатка топлива\n"
         "• Учет заправленного топлива\n"
         "• Готовность к деплою на Railway\n\n"
@@ -413,21 +436,26 @@ async def cmd_help(message: Message):
 
 <b>📝 Как работать с ботом:</b>
 
-1. <b>Добавьте автомобиль</b> - укажите гос. номер и норму расхода
+1. <b>Добавьте автомобиль</b> - укажите:
+   • Гос. номер
+   • Норму расхода (л/км)
+   • Перерасход при простое (л/ч)
+
 2. <b>Создайте путевой лист</b> - заполните данные за день
-3. <b>Бот автоматически рассчитает:</b>
-   • Пробег за день
-   • Расход по норме и фактический
-   • Остаток топлива
-4. <b>Новые возможности:</b>
+
+3. <b>Новые возможности:</b>
+   • Расчет перерасхода по часам простоя
+   • Ввод перерасхода вручную
    • Ввод остатка топлива вручную
    • Учет заправленного топлива
-5. <b>Смотрите статистику</b> за последние 7 дней
+
+4. <b>Смотрите статистику</b> за последние 7 дней
 
 <b>⚠️ Внимание:</b>
 • Время указывайте в формате ЧЧ:ММ
 • Показания одометра - в километрах
 • Топливо - в литрах
+• Простой - в часах
 """
     await message.answer(help_text)
 
@@ -463,6 +491,9 @@ async def cmd_stats(message: Message):
         cursor.execute("SELECT SUM(fuel_actual) FROM waybills")
         total_fuel = cursor.fetchone()[0] or 0
         
+        cursor.execute("SELECT SUM(overuse_hours) FROM waybills")
+        total_idle_hours = cursor.fetchone()[0] or 0
+        
         conn.close()
         
         stats_text = f"""
@@ -472,6 +503,7 @@ async def cmd_stats(message: Message):
 📝 Путевых листов: {waybills_count}
 🛣️ Общий пробег: {total_distance:.0f} км
 ⛽ Общий расход топлива: {total_fuel:.1f} л
+⏱️ Часы простоя: {total_idle_hours:.1f} ч
 
 <b>ℹ️ Информация:</b>
 Бот готов к работе на Railway
@@ -485,7 +517,7 @@ async def cmd_stats(message: Message):
         await message.answer("❌ Ошибка получения статистики")
 
 # ════════════════════════════════════════════════════════════════════════════
-# 🚗 ДОБАВЛЕНИЕ АВТОМОБИЛЯ (БЕЗ ИЗМЕНЕНИЙ)
+# 🚗 ДОБАВЛЕНИЕ АВТОМОБИЛЯ (ОБНОВЛЕНО)
 # ════════════════════════════════════════════════════════════════════════════
 
 @router.message(F.text == "🚗 Добавить автомобиль")
@@ -522,13 +554,30 @@ async def add_vehicle_fuel_rate(message: Message, state: FSMContext):
         await message.answer("❌ Некорректная норма расхода. Введите значение от 0.01 до 5:")
         return
     
+    await state.update_data(fuel_rate=fuel_rate)
+    await message.answer("⏱️ Введите перерасход топлива в час простоя (л/ч):\nНапример: <code>2.0</code>\n(стандартное значение 2.0 л/ч)")
+    await state.set_state(AddVehicleStates.idle_rate)
+
+@router.message(AddVehicleStates.idle_rate)
+async def add_vehicle_idle_rate(message: Message, state: FSMContext):
+    """Обработка перерасхода при простое"""
+    if not validate_number(message.text):
+        await message.answer("❌ Введите корректное число (например: <code>2.0</code>):")
+        return
+    
+    idle_rate = float(message.text.strip())
+    if idle_rate <= 0 or idle_rate > 10:
+        await message.answer("❌ Некорректное значение. Введите значение от 0.1 до 10:")
+        return
+    
     data = await state.get_data()
-    vehicle_id = Database.add_vehicle(data['number'], fuel_rate)
+    vehicle_id = Database.add_vehicle(data['number'], data['fuel_rate'], idle_rate)
     
     if vehicle_id:
         await message.answer(
             f"✅ Автомобиль <b>{data['number']}</b> добавлен!\n"
-            f"⛽ Норма расхода: {fuel_rate} л/км",
+            f"⛽ Норма расхода: {data['fuel_rate']} л/км\n"
+            f"⏱️ Перерасход при простое: {idle_rate} л/ч",
             reply_markup=get_main_keyboard()
         )
     else:
@@ -540,7 +589,7 @@ async def add_vehicle_fuel_rate(message: Message, state: FSMContext):
     await state.clear()
 
 # ════════════════════════════════════════════════════════════════════════════
-# 📊 СПИСОК АВТОМОБИЛЕЙ (БЕЗ ИЗМЕНЕНИЙ)
+# 📊 СПИСОК АВТОМОБИЛЕЙ (ОБНОВЛЕНО)
 # ════════════════════════════════════════════════════════════════════════════
 
 @router.message(F.text == "📊 Мои автомобили")
@@ -558,12 +607,12 @@ async def list_vehicles(message: Message):
     
     text = "<b>🚗 СПИСОК АВТОМОБИЛЕЙ</b>\n" + "━" * 30 + "\n\n"
     for vehicle in vehicles:
-        text += f"🚙 <b>{vehicle['number']}</b>\n⛽ Расход: {vehicle['fuel_rate']} л/км\n\n"
+        text += f"🚙 <b>{vehicle['number']}</b>\n⛽ Расход: {vehicle['fuel_rate']} л/км\n⏱️ Простой: {vehicle['idle_rate']} л/ч\n\n"
     
     await message.answer(text)
 
 # ════════════════════════════════════════════════════════════════════════════
-# 📈 СТАТИСТИКА (БЕЗ ИЗМЕНЕНИЙ)
+# 📈 СТАТИСТИКА (ОБНОВЛЕНО)
 # ════════════════════════════════════════════════════════════════════════════
 
 @router.message(F.text == "📈 Статистика")
@@ -587,7 +636,7 @@ async def show_statistics(message: Message, state: FSMContext):
     )
 
 # ════════════════════════════════════════════════════════════════════════════
-# 📝 НОВЫЙ ПУТЕВОЙ ЛИСТ (БЕЗ ИЗМЕНЕНИЙ)
+# 📝 НОВЫЙ ПУТЕВОЙ ЛИСТ (ОБНОВЛЕНО)
 # ════════════════════════════════════════════════════════════════════════════
 
 @router.message(F.text == "📝 Новый путевой лист")
@@ -612,7 +661,7 @@ async def new_waybill(message: Message, state: FSMContext):
     logger.info(f"📝 Пользователь {message.from_user.id} начал новый путевой лист")
 
 # ════════════════════════════════════════════════════════════════════════════
-# 🚙 ВЫБОР АВТОМОБИЛЯ (БЕЗ ИЗМЕНЕНИЙ)
+# 🚙 ВЫБОР АВТОМОБИЛЯ (ОБНОВЛЕНО)
 # ════════════════════════════════════════════════════════════════════════════
 
 @router.message(F.text.startswith("🚙 "))
@@ -665,6 +714,7 @@ async def vehicle_selected(message: Message, state: FSMContext):
                 f"📏 Пробег: {stats['total_distance']:.0f} км\n"
                 f"⛽ Топливо: {stats['total_fuel']:.2f} л\n"
                 f"⛽ Заправлено: {stats['total_refuel']:.2f} л\n"
+                f"⏱️ Часы простоя: {stats['total_idle_hours']:.1f} ч\n"
                 f"📊 Средний расход: {avg_consumption:.2f} л/100км",
                 reply_markup=get_main_keyboard()
             )
@@ -675,6 +725,7 @@ async def vehicle_selected(message: Message, state: FSMContext):
             vehicle_id=vehicle['id'],
             vehicle_number=vehicle['number'],
             fuel_rate=vehicle['fuel_rate'],
+            idle_rate=vehicle['idle_rate'],  # Добавляем простой
             user_id=user_id
         )
         
@@ -837,16 +888,85 @@ async def odo_end_input(message: Message, state: FSMContext):
     
     await state.update_data(odo_end=odo_end, distance=distance)
     
+    # Теперь предлагаем выбрать способ учета перерасхода
     await message.answer(
         f"📏 Пробег за день: <b>{distance:.0f} км</b>\n\n"
-        "⚠️ Введите перерасход топлива (л), если есть, или 0:",
+        "⚠️ <b>Как учесть перерасход топлива?</b>",
+        reply_markup=get_overuse_choice_keyboard()
+    )
+    await state.set_state(WaybillStates.overuse_choice)
+
+# ════════════════════════════════════════════════════════════════════════════
+# ⏱️ НОВЫЙ ФУНКЦИОНАЛ: УЧЕТ ПРОСТОЯ И ПЕРЕРАСХОДА
+# ════════════════════════════════════════════════════════════════════════════
+
+@router.message(WaybillStates.overuse_choice)
+async def overuse_choice_input(message: Message, state: FSMContext):
+    """Обработка выбора способа учета перерасхода"""
+    if message.text == "🕒 Рассчитать по простому":
+        await message.answer(
+            "⏱️ Введите количество часов простоя автомобиля:\n"
+            "(например: <code>1.5</code> для 1 часа 30 минут)",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await state.set_state(WaybillStates.overuse_hours)
+        
+    elif message.text == "✏️ Ввести перерасход вручную":
+        await message.answer(
+            "📉 Введите перерасход топлива (л):\n"
+            "(например: <code>3.0</code> для 3 литров)",
+            reply_markup=get_skip_keyboard()
+        )
+        await state.set_state(WaybillStates.overuse_manual)
+        
+    elif message.text == "✅ Нет перерасхода":
+        await state.update_data(overuse=0, overuse_hours=0, overuse_calculated=0)
+        await message.answer(
+            "💰 Введите экономию топлива (л), если есть, или 0:",
+            reply_markup=get_skip_keyboard()
+        )
+        await state.set_state(WaybillStates.economy)
+    else:
+        await message.answer("❌ Пожалуйста, выберите один из предложенных вариантов:", 
+                           reply_markup=get_overuse_choice_keyboard())
+
+@router.message(WaybillStates.overuse_hours)
+async def overuse_hours_input(message: Message, state: FSMContext):
+    """Ввод часов простоя для расчета перерасхода"""
+    if not validate_number(message.text):
+        await message.answer("❌ Введите корректное число!")
+        return
+    
+    idle_hours = float(message.text)
+    if idle_hours < 0:
+        await message.answer("❌ Часы простоя не могут быть отрицательными!")
+        return
+    
+    data = await state.get_data()
+    idle_rate = data.get('idle_rate', 2.0)  # По умолчанию 2.0 л/ч
+    
+    # Рассчитываем перерасход: часы простоя × перерасход в час
+    overuse = idle_hours * idle_rate
+    
+    await state.update_data(
+        overuse=overuse,
+        overuse_hours=idle_hours,
+        overuse_calculated=1  # Флаг расчета по простому
+    )
+    
+    await message.answer(
+        f"📊 <b>РАСЧЕТ ПЕРЕРАСХОДА ПО ПРОСТОЮ:</b>\n"
+        f"⏱️ Часы простоя: {idle_hours:.1f} ч\n"
+        f"⛽ Перерасход в час: {idle_rate} л/ч\n"
+        f"📉 Итого перерасход: <b>{overuse:.2f} л</b>\n\n"
+        f"💰 Введите экономию топлива (л), если есть, или 0:",
         reply_markup=get_skip_keyboard()
     )
-    await state.set_state(WaybillStates.overuse)
+    await state.set_state(WaybillStates.economy)
 
-@router.message(WaybillStates.overuse)
-async def overuse_input(message: Message, state: FSMContext):
-    """Ввод перерасхода"""
+@router.message(WaybillStates.overuse_manual)
+async def overuse_manual_input(message: Message, state: FSMContext):
+    """Ручной ввод перерасхода"""
     if message.text == "⏭ Пропустить":
         overuse = 0
     elif not validate_number(message.text):
@@ -855,7 +975,11 @@ async def overuse_input(message: Message, state: FSMContext):
     else:
         overuse = float(message.text)
     
-    await state.update_data(overuse=overuse)
+    await state.update_data(
+        overuse=overuse,
+        overuse_hours=0,
+        overuse_calculated=0  # Не расчет по простому
+    )
     
     await message.answer(
         "💰 Введите экономию топлива (л), если есть, или 0:",
@@ -907,7 +1031,7 @@ async def economy_input(message: Message, state: FSMContext):
     await state.set_state(WaybillStates.fuel_end_choice)
 
 # ════════════════════════════════════════════════════════════════════════════
-# ⛽ НОВЫЙ ФУНКЦИОНАЛ: ВВОД ОСТАТКА ТОПЛИВА
+# ⛽ ФУНКЦИОНАЛ: ВВОД ОСТАТКА ТОПЛИВА И ЗАПРАВКИ
 # ════════════════════════════════════════════════════════════════════════════
 
 @router.message(WaybillStates.fuel_end_choice)
@@ -1020,6 +1144,8 @@ async def calculate_and_save_waybill(message: Message, state: FSMContext):
     distance = data['odo_end'] - data['odo_start']
     fuel_norm = distance * data['fuel_rate']
     overuse = data.get('overuse', 0)
+    overuse_hours = data.get('overuse_hours', 0)
+    overuse_calculated = data.get('overuse_calculated', 0)
     economy = data.get('economy', 0)
     fuel_actual = data['fuel_actual']  # Уже рассчитано
     fuel_start = data['fuel_start']
@@ -1050,6 +1176,8 @@ async def calculate_and_save_waybill(message: Message, state: FSMContext):
         'fuel_norm': fuel_norm,
         'fuel_actual': fuel_actual,
         'overuse': overuse,
+        'overuse_hours': overuse_hours,
+        'overuse_calculated': overuse_calculated,
         'economy': economy,
         'fuel_rate': data['fuel_rate'],
         'fuel_end_manual': fuel_end_manual
@@ -1059,6 +1187,12 @@ async def calculate_and_save_waybill(message: Message, state: FSMContext):
     
     if waybill_id:
         # Формирование отчета
+        overuse_info = ""
+        if overuse_calculated and overuse_hours > 0:
+            overuse_info = f"\n⏱️ Часы простоя: {overuse_hours:.1f} ч"
+        elif overuse > 0:
+            overuse_info = f"\n📉 Введен вручную: {overuse:.2f} л"
+        
         report = f"""
 ✅ <b>ПУТЕВОЙ ЛИСТ #{waybill_id} СОХРАНЕН</b>
 ━━━━━━━━━━━━━━━━━━━━━
@@ -1073,7 +1207,7 @@ async def calculate_and_save_waybill(message: Message, state: FSMContext):
 🛣 Одометр начало: {data['odo_start']:.0f} км
 🛣 Одометр конец: {data['odo_end']:.0f} км
 ⛽ Топливо начало: {fuel_start:.2f} л
-📈 Перерасход: {overuse:.2f} л
+📈 Перерасход: {overuse:.2f} л{overuse_info}
 📉 Экономия: {economy:.2f} л
 {f'⛽ Заправлено: {fuel_refuel:.2f} л' if fuel_refuel > 0 else ''}
 {f'✏️ Остаток вручную: {fuel_end:.2f} л' if fuel_end_manual else ''}
@@ -1114,7 +1248,7 @@ async def calculate_and_save_waybill(message: Message, state: FSMContext):
 async def on_startup():
     """Запуск при старте бота"""
     logger.info("=" * 70)
-    logger.info("🚀 Бот учета путевых листов v2.0")
+    logger.info("🚀 Бот учета путевых листов v2.1")
     logger.info("=" * 70)
     
     # Инициализация базы данных
@@ -1175,4 +1309,3 @@ if __name__ == "__main__":
         logger.info("\n👋 До свидания!")
     except Exception as e:
         logger.error(f"💥 Фатальная ошибка при запуске: {e}")
-
