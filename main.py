@@ -398,7 +398,7 @@ def get_overuse_choice_keyboard() -> ReplyKeyboardMarkup:
     """Клавиатура для выбора способа учета перерасхода"""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🕒 Рассчитать по простому")],
+            [KeyboardButton(text="🕒 Рассчитать по часам")],
             [KeyboardButton(text="✏️ Ввести перерасход вручную")],
             [KeyboardButton(text="✅ Нет перерасхода")]
         ],
