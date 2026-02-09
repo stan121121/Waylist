@@ -554,4 +554,5 @@ def get_vehicles_list_keyboard(vehicles: List[Dict], with_cancel: bool = True) -
     for vehicle in vehicles:
         buttons.append([KeyboardButton(text=f"🚙 {vehicle['number']}")])
     
-    if with_can
+    if with_can:
+
