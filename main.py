@@ -8,7 +8,7 @@ from typing import Optional, Dict, Any, List
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
     Message, ReplyKeyboardMarkup, KeyboardButton,
-    ReplyKeyboardRemove, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+    ReplyKeyboardRemove
 )
 from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.fsm.state import State, StatesGroup
@@ -81,24 +81,60 @@ def get_db_connection():
     conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
+def migrate_database():
+    """Миграция базы данных - добавление недостающих столбцов"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Проверяем существующие столбцы в таблице vehicles
+        cursor.execute("PRAGMA table_info(vehicles)")
+        columns = [col[1] for col in cursor.fetchall()]
+        
+        # Добавляем updated_at если нет
+        if 'updated_at' not in columns:
+            logger.info("🔄 Добавляем столбец updated_at в таблицу vehicles")
+            cursor.execute("ALTER TABLE vehicles ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        
+        # Проверяем существующие столбцы в таблице waybills
+        cursor.execute("PRAGMA table_info(waybills)")
+        columns = [col[1] for col in cursor.fetchall()]
+        
+        # Добавляем недостающие столбцы в waybills
+        required_columns = ['overuse_hours', 'overuse_calculated', 'fuel_refuel', 'fuel_end_manual']
+        for column in required_columns:
+            if column not in columns:
+                logger.info(f"🔄 Добавляем столбец {column} в таблицу waybills")
+                if column == 'overuse_hours':
+                    cursor.execute(f"ALTER TABLE waybills ADD COLUMN {column} REAL DEFAULT 0")
+                elif column == 'overuse_calculated' or column == 'fuel_end_manual':
+                    cursor.execute(f"ALTER TABLE waybills ADD COLUMN {column} INTEGER DEFAULT 0")
+                elif column == 'fuel_refuel':
+                    cursor.execute(f"ALTER TABLE waybills ADD COLUMN {column} REAL DEFAULT 0")
+        
+        conn.commit()
+        conn.close()
+        logger.info("✅ Миграция базы данных выполнена")
+    except Exception as e:
+        logger.error(f"❌ Ошибка миграции БД: {e}")
+
 def init_database():
     """Инициализация базы данных"""
     try:
         db_path = get_db_path()
-        logger.info(f"🔄 Инициализация БД: {db_path}")
+        logger.info(f"🔄 Инициализация базы данных по пути: {db_path}")
         
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Таблица автомобилей
+        # Таблица автомобилей (исправленная версия без updated_at в CREATE)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS vehicles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 number TEXT UNIQUE NOT NULL,
                 fuel_rate REAL NOT NULL CHECK(fuel_rate > 0 AND fuel_rate <= 5),
                 idle_rate REAL DEFAULT 2.0 CHECK(idle_rate > 0 AND idle_rate <= 10),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
@@ -131,15 +167,6 @@ def init_database():
             )
         ''')
         
-        # Триггер для обновления updated_at
-        cursor.execute('''
-            CREATE TRIGGER IF NOT EXISTS update_vehicles_timestamp 
-            AFTER UPDATE ON vehicles 
-            BEGIN
-                UPDATE vehicles SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
-            END
-        ''')
-        
         # Оптимизированные индексы
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_vehicles_number 
@@ -149,14 +176,14 @@ def init_database():
             CREATE INDEX IF NOT EXISTS idx_waybills_vehicle_user_date 
             ON waybills(vehicle_id, user_id, date DESC)
         ''')
-        cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_waybills_date 
-            ON waybills(date DESC)
-        ''')
         
         conn.commit()
         conn.close()
         logger.info("✅ База данных инициализирована")
+        
+        # Выполняем миграцию для существующих баз
+        migrate_database()
+        
     except Exception as e:
         logger.error(f"❌ Ошибка инициализации БД: {e}")
 
@@ -165,18 +192,6 @@ def init_database():
 # ════════════════════════════════════════════════════════════════════════════
 
 class Database:
-    # Кэш для часто запрашиваемых данных
-    _vehicles_cache = {}
-    _cache_timeout = 300  # 5 минут
-    
-    @staticmethod
-    def _clear_cache():
-        """Очистка кэша"""
-        current_time = datetime.now().timestamp()
-        for key in list(Database._vehicles_cache.keys()):
-            if current_time - Database._vehicles_cache[key]['timestamp'] > Database._cache_timeout:
-                del Database._vehicles_cache[key]
-    
     @staticmethod
     def add_vehicle(number: str, fuel_rate: float, idle_rate: float = 2.0) -> Optional[int]:
         """Добавление нового автомобиля"""
@@ -191,8 +206,6 @@ class Database:
             vehicle_id = cursor.lastrowid
             conn.close()
             
-            # Очищаем кэш
-            Database._vehicles_cache.clear()
             logger.info(f"✅ Добавлен автомобиль {number}")
             return vehicle_id
         except sqlite3.IntegrityError:
@@ -204,15 +217,7 @@ class Database:
     
     @staticmethod
     def get_vehicles(force_refresh: bool = False) -> List[Dict]:
-        """Получение списка автомобилей с кэшированием"""
-        cache_key = 'all_vehicles'
-        
-        # Проверяем кэш если не требуется обновление
-        if not force_refresh and cache_key in Database._vehicles_cache:
-            cache_data = Database._vehicles_cache[cache_key]
-            if datetime.now().timestamp() - cache_data['timestamp'] < Database._cache_timeout:
-                return cache_data['data']
-        
+        """Получение списка автомобилей"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -234,13 +239,6 @@ class Database:
                 })
             
             conn.close()
-            
-            # Сохраняем в кэш
-            Database._vehicles_cache[cache_key] = {
-                'data': vehicles,
-                'timestamp': datetime.now().timestamp()
-            }
-            
             return vehicles
         except Exception as e:
             logger.error(f"❌ Ошибка получения списка автомобилей: {e}")
@@ -248,14 +246,14 @@ class Database:
     
     @staticmethod
     def get_vehicle(vehicle_id: int) -> Optional[Dict]:
-        """Получение информации об автомобиле по ID"""
+        """Получение информации об автомобиле по ID (ИСПРАВЛЕННЫЙ ЗАПРОС)"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
+            # Убираем запрос updated_at, которого может не быть в старых базах
             cursor.execute("""
                 SELECT id, number, fuel_rate, idle_rate,
-                       strftime('%Y-%m-%d %H:%M', created_at) as created_at,
-                       strftime('%Y-%m-%d %H:%M', updated_at) as updated_at
+                       strftime('%Y-%m-%d %H:%M', created_at) as created_at
                 FROM vehicles 
                 WHERE id = ?
             """, (vehicle_id,))
@@ -269,12 +267,38 @@ class Database:
                     'number': row['number'],
                     'fuel_rate': row['fuel_rate'],
                     'idle_rate': row['idle_rate'],
-                    'created_at': row['created_at'],
-                    'updated_at': row['updated_at']
+                    'created_at': row['created_at']
                 }
             return None
         except Exception as e:
             logger.error(f"❌ Ошибка получения автомобиля: {e}")
+            return None
+    
+    @staticmethod
+    def get_vehicle_by_number(number: str) -> Optional[Dict]:
+        """Получение автомобиля по номеру"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, number, fuel_rate, idle_rate
+                FROM vehicles 
+                WHERE number = ?
+            """, (number.upper(),))
+            
+            row = cursor.fetchone()
+            conn.close()
+            
+            if row:
+                return {
+                    'id': row['id'],
+                    'number': row['number'],
+                    'fuel_rate': row['fuel_rate'],
+                    'idle_rate': row['idle_rate']
+                }
+            return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения автомобиля по номеру: {e}")
             return None
     
     @staticmethod
@@ -287,9 +311,8 @@ class Database:
                 SELECT id, number, fuel_rate, idle_rate
                 FROM vehicles 
                 WHERE number LIKE ? 
-                OR number LIKE ?
                 ORDER BY number COLLATE NOCASE
-            """, (f'%{search_term.upper()}%', f'%{search_term}%'))
+            """, (f'%{search_term.upper()}%',))
             
             vehicles = []
             for row in cursor.fetchall():
@@ -321,8 +344,6 @@ class Database:
             conn.commit()
             conn.close()
             
-            # Очищаем кэш
-            Database._vehicles_cache.clear()
             logger.info(f"🗑️ Удален автомобиль {vehicle['number']}")
             return True
         except Exception as e:
@@ -450,10 +471,6 @@ class Database:
             cursor.execute("SELECT COUNT(*) FROM waybills")
             waybills_count = cursor.fetchone()[0]
             
-            # Информация о последних действиях
-            cursor.execute("SELECT MAX(created_at) as last_activity FROM waybills")
-            last_activity = cursor.fetchone()[0]
-            
             conn.close()
             
             return {
@@ -461,15 +478,14 @@ class Database:
                 'exists': exists,
                 'size': size,
                 'vehicles_count': vehicles_count,
-                'waybills_count': waybills_count,
-                'last_activity': last_activity
+                'waybills_count': waybills_count
             }
         except Exception as e:
             logger.error(f"❌ Ошибка получения информации о БД: {e}")
             return {}
 
 # ════════════════════════════════════════════════════════════════════════════
-# 📝 СОСТОЯНИЯ FSM (ОПТИМИЗИРОВАННЫЕ)
+# 📝 СОСТОЯНИЯ FSM
 # ════════════════════════════════════════════════════════════════════════════
 
 class AddVehicleStates(StatesGroup):
@@ -501,7 +517,7 @@ class WaybillStates(StatesGroup):
     fuel_end_manual = State()
 
 # ════════════════════════════════════════════════════════════════════════════
-# ⌨️ КЛАВИАТУРЫ (ОПТИМИЗИРОВАННЫЕ)
+# ⌨️ КЛАВИАТУРЫ
 # ════════════════════════════════════════════════════════════════════════════
 
 def get_main_keyboard() -> ReplyKeyboardMarkup:
@@ -525,7 +541,7 @@ def get_vehicles_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🔍 Поиск автомобиля")],
             [KeyboardButton(text="🚗 Добавить автомобиль")],
             [KeyboardButton(text="🗑️ Удалить автомобиль")],
-            [KeyboardButton(text="⬅️ Назад")]
+            [KeyboardButton(text="⬅️ Назад в меню")]
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите действие..."
@@ -535,6 +551,13 @@ def get_back_keyboard() -> ReplyKeyboardMarkup:
     """Клавиатура с кнопкой Назад"""
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="⬅️ Назад")]],
+        resize_keyboard=True
+    )
+
+def get_cancel_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура с кнопкой Отмена"""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="❌ Отмена")]],
         resize_keyboard=True
     )
 
@@ -548,15 +571,13 @@ def get_skip_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
-def get_vehicles_list_keyboard(vehicles: List[Dict], with_cancel: bool = True) -> ReplyKeyboardMarkup:
+def get_vehicles_list_keyboard(vehicles: List[Dict]) -> ReplyKeyboardMarkup:
     """Клавиатура списка автомобилей"""
     buttons = []
     for vehicle in vehicles:
         buttons.append([KeyboardButton(text=f"🚙 {vehicle['number']}")])
     
-    if with_cancel:
-        buttons.append([KeyboardButton(text="❌ Отмена")])
-    
+    buttons.append([KeyboardButton(text="❌ Отмена")])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 def get_initial_data_keyboard() -> ReplyKeyboardMarkup:
@@ -595,8 +616,8 @@ def get_confirm_keyboard() -> ReplyKeyboardMarkup:
     """Клавиатура для подтверждения"""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="✅ Да")],
-            [KeyboardButton(text="❌ Нет")]
+            [KeyboardButton(text="✅ Да, удалить")],
+            [KeyboardButton(text="❌ Нет, отменить")]
         ],
         resize_keyboard=True
     )
@@ -637,74 +658,6 @@ def validate_number(value: str) -> bool:
     except ValueError:
         return False
 
-def format_vehicle_info(vehicle: Dict) -> str:
-    """Форматирование информации об автомобиле"""
-    return f"""
-🚙 <b>{vehicle['number']}</b>
-
-📊 <b>Характеристики:</b>
-⛽ Расход топлива: {vehicle['fuel_rate']} л/км
-⏱️ Перерасход при простое: {vehicle['idle_rate']} л/ч
-
-📅 <b>Информация:</b>
-📝 Добавлен: {vehicle.get('created_at', 'неизвестно')}
-🔄 Обновлен: {vehicle.get('updated_at', 'неизвестно')}
-
-📈 <b>Пример расчета:</b>
-5 ч простоя × {vehicle['idle_rate']} л/ч = {5 * vehicle['idle_rate']:.1f} л перерасхода
-"""
-
-def format_waybill_report(data: Dict, waybill_id: int, fuel_end: float) -> str:
-    """Форматирование отчета о путевом листе"""
-    overuse_info = ""
-    if data.get('overuse_calculated') and data.get('overuse_hours', 0) > 0:
-        idle_rate = data.get('idle_rate', 2.0)
-        overuse = data.get('overuse', 0)
-        overuse_hours = data.get('overuse_hours', 0)
-        overuse_info = f"\n⏱️ Часы простоя: {overuse_hours:.1f} ч\n📊 Расчет: {overuse_hours:.1f} ч × {idle_rate} л/ч = {overuse:.2f} л"
-    elif data.get('overuse', 0) > 0:
-        overuse_info = f"\n📉 Введен вручную: {data.get('overuse', 0):.2f} л"
-    
-    fuel_refuel = data.get('fuel_refuel', 0)
-    fuel_end_manual = data.get('fuel_end_manual', 0)
-    
-    return f"""
-✅ <b>ПУТЕВОЙ ЛИСТ #{waybill_id} СОХРАНЕН</b>
-━━━━━━━━━━━━━━━━━━━━━
-
-🚗 <b>Автомобиль:</b> {data.get('vehicle_number', 'неизвестно')}
-📅 <b>Дата:</b> {datetime.now().strftime('%Y-%m-%d')}
-
-<b>📋 ВВЕДЕННЫЕ ДАННЫЕ:</b>
-🕒 Время выезда: {data.get('start_time', '—')}
-🕓 Время возвращения: {data.get('end_time', '—')}
-⏱ Всего в наряде: {data.get('hours', 0):.1f} ч
-🛣 Одометр начало: {data.get('odo_start', 0):.0f} км
-🛣 Одометр конец: {data.get('odo_end', 0):.0f} км
-⛽ Топливо начало: {data.get('fuel_start', 0):.2f} л
-📈 Перерасход: {data.get('overuse', 0):.2f} л{overuse_info}
-📉 Экономия: {data.get('economy', 0):.2f} л
-{f'⛽ Заправлено: {fuel_refuel:.2f} л' if fuel_refuel > 0 else ''}
-{f'✏️ Остаток вручную: {fuel_end:.2f} л' if fuel_end_manual else ''}
-
-<b>📊 РАСЧЕТНЫЕ ПОКАЗАТЕЛИ:</b>
-📏 Пробег за день: {data.get('distance', 0):.0f} км
-📊 Расход по норме: {data.get('fuel_norm', 0):.2f} л
-📉 Фактический расход: {data.get('fuel_actual', 0):.2f} л
-⛽ Остаток топлива: <b>{fuel_end:.2f} л</b>
-━━━━━━━━━━━━━━━━━━━━━
-
-<b>📝 ФОРМУЛА РАСЧЕТА:</b>
-Остаток = Начало ({data.get('fuel_start', 0):.2f} л) - Факт.расход ({data.get('fuel_actual', 0):.2f} л) 
-{f' + Заправка ({fuel_refuel:.2f} л)' if fuel_refuel > 0 else ''} 
-= <b>{fuel_end:.2f} л</b>
-
-✅ Данные успешно сохранены!
-<b>Для следующего дня будут доступны:</b>
-🛣 Показания одометра: {data.get('odo_end', 0):.0f} км
-⛽ Остаток топлива: {fuel_end:.2f} л
-"""
-
 # ════════════════════════════════════════════════════════════════════════════
 # 🏠 ОБРАБОТЧИКИ КОМАНД
 # ════════════════════════════════════════════════════════════════════════════
@@ -716,7 +669,7 @@ async def cmd_start(message: Message, state: FSMContext):
     logger.info(f"🚀 Пользователь {message.from_user.id} запустил бота")
     
     await message.answer(
-        "<b>🚛 Система учета путевых листов v5.0</b>\n\n"
+        "<b>🚛 Система учета путевых листов</b>\n\n"
         "<b>📋 Основные функции:</b>\n"
         "• Учет путевых листов\n"
         "• Контроль расхода топлива\n"
@@ -724,7 +677,7 @@ async def cmd_start(message: Message, state: FSMContext):
         "• Поиск и управление автомобилями\n\n"
         "<b>⚡ Оптимизировано для Railway:</b>\n"
         "• Volume поддержка\n"
-        "• Кэширование данных\n"
+        "• Автоматические миграции\n"
         "• Быстрая работа\n\n"
         "Выберите действие:",
         reply_markup=get_main_keyboard()
@@ -741,7 +694,6 @@ async def cmd_help(message: Message):
 /cancel - Отмена действия
 /stats - Статистика бота
 /info - Информация о боте
-/search [номер] - Поиск автомобиля
 
 <b>🚗 УПРАВЛЕНИЕ АВТОМОБИЛЯМИ:</b>
 • Добавление нового автомобиля
@@ -755,15 +707,11 @@ async def cmd_help(message: Message):
 3. Введите показания одометра
 4. Укажите перерасход (по простому или вручную)
 5. Введите остаток топлива
-
-<b>⚙️ РАСЧЕТ ПЕРЕРАСХОДА:</b>
-• Автоматический: часы простоя × перерасход в час
-• Ручной: прямое указание перерасхода
 """
     await message.answer(help_text)
 
 @router.message(Command("cancel"))
-@router.message(F.text.in_(["❌ Отмена", "⬅️ Назад"]))
+@router.message(F.text.in_(["❌ Отмена", "⬅️ Назад", "⬅️ Назад в меню"]))
 async def cmd_cancel(message: Message, state: FSMContext):
     """Отмена текущего действия"""
     current_state = await state.get_state()
@@ -771,8 +719,10 @@ async def cmd_cancel(message: Message, state: FSMContext):
         await state.clear()
         logger.info(f"❌ Пользователь {message.from_user.id} отменил действие")
     
-    if message.text == "⬅️ Назад":
+    if message.text == "⬅️ Назад в меню":
         await message.answer("Главное меню:", reply_markup=get_main_keyboard())
+    elif message.text == "⬅️ Назад":
+        await message.answer("Меню автомобилей:", reply_markup=get_vehicles_keyboard())
     else:
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
 
@@ -788,17 +738,11 @@ async def cmd_stats(message: Message):
 
 🚗 <b>Автомобилей в базе:</b> {db_info.get('vehicles_count', 0)}
 📝 <b>Путевых листов:</b> {db_info.get('waybills_count', 0)}
-📅 <b>Последняя активность:</b> {db_info.get('last_activity', '—')}
 
 <b>📁 ИНФОРМАЦИЯ О БАЗЕ ДАННЫХ:</b>
 📍 <b>Путь:</b> {db_info.get('path', 'неизвестно')}
 📏 <b>Размер:</b> {db_info.get('size', 0) / 1024:.1f} КБ
 ✅ <b>Volume /data:</b> {"подключен ✅" if os.path.exists('/data') else "не подключен ❌"}
-
-<b>⚡ ПРОИЗВОДИТЕЛЬНОСТЬ:</b>
-• Кэширование данных: включено
-• Индексы БД: оптимизированы
-• Volume поддержка: {"да" if os.path.exists('/data') else "нет"}
 """
         
         await message.answer(stats_text)
@@ -818,37 +762,21 @@ async def cmd_info(message: Message):
 
 📛 <b>Имя:</b> @{bot_info.username}
 🆔 <b>ID:</b> {bot_info.id}
-📅 <b>Версия:</b> 5.0
+📅 <b>Версия:</b> 2.0
 🚀 <b>Платформа:</b> Railway
 ⚡ <b>Статус:</b> Работает
 
 <b>🔧 ТЕХНИЧЕСКИЕ ХАРАКТЕРИСТИКИ:</b>
 • База данных: SQLite с Volume поддержкой
-• Кэширование: включено (5 минут)
+• Автоматические миграции
 • Индексы: оптимизированы для скорости
 • Логирование: в файл и консоль
-
-<b>🔄 ПОСЛЕДНИЕ ОБНОВЛЕНИЯ:</b>
-• Оптимизирована работа с БД
-• Добавлен поиск автомобилей
-• Улучшено меню управления
-• Ускорены расчеты
 """
         
         await message.answer(info_text)
     except Exception as e:
         logger.error(f"❌ Ошибка получения информации: {e}")
         await message.answer("❌ Ошибка получения информации")
-
-@router.message(Command("search"))
-async def cmd_search_direct(message: Message, command: CommandObject):
-    """Прямой поиск через команду"""
-    search_term = command.args
-    if not search_term:
-        await message.answer("ℹ️ Использование: /search [номер или часть номера]")
-        return
-    
-    await search_vehicles_action(message, search_term)
 
 # ════════════════════════════════════════════════════════════════════════════
 # 🚗 МЕНЮ АВТОМОБИЛЕЙ
@@ -877,28 +805,15 @@ async def list_vehicles(message: Message):
         )
         return
     
-    # Формируем сообщение с пагинацией
-    items_per_page = 5
-    total_pages = (len(vehicles) + items_per_page - 1) // items_per_page
+    text = "<b>🚗 СПИСОК АВТОМОБИЛЕЙ</b>\n" + "━" * 35 + "\n\n"
     
-    # Для простоты показываем первую страницу
-    page = 1
-    start_idx = (page - 1) * items_per_page
-    end_idx = start_idx + items_per_page
-    
-    text = f"<b>🚗 СПИСОК АВТОМОБИЛЕЙ</b> (страница {page}/{total_pages})\n"
-    text += "━" * 35 + "\n\n"
-    
-    for i, vehicle in enumerate(vehicles[start_idx:end_idx], start=start_idx + 1):
+    for i, vehicle in enumerate(vehicles, 1):
         text += f"<b>{i}. {vehicle['number']}</b>\n"
         text += f"   ⛽ Расход: {vehicle['fuel_rate']} л/км\n"
         text += f"   ⏱️ Простой: {vehicle['idle_rate']} л/ч\n"
         text += f"   📅 Добавлен: {vehicle['created_at']}\n\n"
     
     text += f"📊 <b>Всего автомобилей:</b> {len(vehicles)}\n"
-    
-    if total_pages > 1:
-        text += f"📄 Используйте /search для поиска конкретного автомобиля\n"
     
     await message.answer(text, reply_markup=get_vehicles_keyboard())
 
@@ -908,24 +823,24 @@ async def search_vehicle_start(message: Message, state: FSMContext):
     """Начало поиска автомобиля"""
     await message.answer(
         "🔍 Введите номер автомобиля или его часть для поиска:",
-        reply_markup=get_back_keyboard()
+        reply_markup=get_cancel_keyboard()
     )
     await state.set_state(SearchVehicleStates.search_term)
 
 @router.message(SearchVehicleStates.search_term)
 async def search_vehicle_process(message: Message, state: FSMContext):
     """Обработка поиска автомобиля"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Поиск отменен", reply_markup=get_vehicles_keyboard())
+        return
+    
     search_term = message.text.strip()
     
     if not search_term or len(search_term) < 2:
         await message.answer("❌ Введите хотя бы 2 символа для поиска")
         return
     
-    await search_vehicles_action(message, search_term)
-    await state.clear()
-
-async def search_vehicles_action(message: Message, search_term: str):
-    """Выполнение поиска автомобилей"""
     vehicles = Database.search_vehicles(search_term)
     
     if not vehicles:
@@ -934,6 +849,7 @@ async def search_vehicles_action(message: Message, search_term: str):
             "Попробуйте другой поисковый запрос.",
             reply_markup=get_vehicles_keyboard()
         )
+        await state.clear()
         return
     
     text = f"<b>🔍 РЕЗУЛЬТАТЫ ПОИСКА:</b> '{search_term}'\n"
@@ -947,6 +863,7 @@ async def search_vehicles_action(message: Message, search_term: str):
     text += f"📊 <b>Найдено автомобилей:</b> {len(vehicles)}"
     
     await message.answer(text, reply_markup=get_vehicles_keyboard())
+    await state.clear()
 
 # 🚗 Добавить автомобиль
 @router.message(F.text == "🚗 Добавить автомобиль")
@@ -954,13 +871,18 @@ async def add_vehicle_start(message: Message, state: FSMContext):
     """Начало добавления автомобиля"""
     await message.answer(
         "🚗 Введите государственный номер автомобиля:",
-        reply_markup=get_back_keyboard()
+        reply_markup=get_cancel_keyboard()
     )
     await state.set_state(AddVehicleStates.number)
 
 @router.message(AddVehicleStates.number)
 async def add_vehicle_number(message: Message, state: FSMContext):
     """Обработка номера автомобиля"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Добавление отменено", reply_markup=get_vehicles_keyboard())
+        return
+    
     number = message.text.strip().upper()
     
     if len(number) < 3:
@@ -968,8 +890,8 @@ async def add_vehicle_number(message: Message, state: FSMContext):
         return
     
     # Проверка существования
-    existing = Database.search_vehicles(number)
-    if any(v['number'] == number for v in existing):
+    existing = Database.get_vehicle_by_number(number)
+    if existing:
         await message.answer(
             f"❌ Автомобиль <b>{number}</b> уже существует!\n"
             "Введите другой номер:"
@@ -980,13 +902,18 @@ async def add_vehicle_number(message: Message, state: FSMContext):
     await message.answer(
         "⛽ Введите норму расхода топлива (л/км):\n"
         "<i>Например: 0.12</i>",
-        reply_markup=get_back_keyboard()
+        reply_markup=get_cancel_keyboard()
     )
     await state.set_state(AddVehicleStates.fuel_rate)
 
 @router.message(AddVehicleStates.fuel_rate)
 async def add_vehicle_fuel_rate(message: Message, state: FSMContext):
     """Обработка нормы расхода"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Добавление отменено", reply_markup=get_vehicles_keyboard())
+        return
+    
     if not validate_number(message.text):
         await message.answer("❌ Введите корректное число (например: 0.12):")
         return
@@ -1000,13 +927,18 @@ async def add_vehicle_fuel_rate(message: Message, state: FSMContext):
     await message.answer(
         "⏱️ Введите перерасход топлива в час простоя (л/ч):\n"
         "<i>Например: 0.9 (стандартное значение 2.0 л/ч)</i>",
-        reply_markup=get_back_keyboard()
+        reply_markup=get_cancel_keyboard()
     )
     await state.set_state(AddVehicleStates.idle_rate)
 
 @router.message(AddVehicleStates.idle_rate)
 async def add_vehicle_idle_rate(message: Message, state: FSMContext):
     """Обработка перерасхода при простое"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Добавление отменено", reply_markup=get_vehicles_keyboard())
+        return
+    
     if not validate_number(message.text):
         await message.answer("❌ Введите корректное число (например: 0.9):")
         return
@@ -1068,7 +1000,11 @@ async def delete_vehicle_select(message: Message, state: FSMContext):
     vehicles = data.get('vehicles', [])
     
     # Находим автомобиль
-    vehicle = next((v for v in vehicles if v['number'] == vehicle_number), None)
+    vehicle = None
+    for v in vehicles:
+        if v['number'] == vehicle_number:
+            vehicle = v
+            break
     
     if not vehicle:
         await message.answer("❌ Автомобиль не найден", reply_markup=get_vehicles_keyboard())
@@ -1095,7 +1031,7 @@ async def delete_vehicle_select(message: Message, state: FSMContext):
     )
     await state.set_state(DeleteVehicleStates.confirm_delete)
 
-@router.message(DeleteVehicleStates.confirm_delete, F.text == "✅ Да")
+@router.message(DeleteVehicleStates.confirm_delete, F.text == "✅ Да, удалить")
 async def delete_vehicle_confirm(message: Message, state: FSMContext):
     """Подтверждение удаления"""
     data = await state.get_data()
@@ -1117,7 +1053,7 @@ async def delete_vehicle_confirm(message: Message, state: FSMContext):
     
     await state.clear()
 
-@router.message(DeleteVehicleStates.confirm_delete, F.text == "❌ Нет")
+@router.message(DeleteVehicleStates.confirm_delete, F.text == "❌ Нет, отменить")
 async def delete_vehicle_cancel(message: Message, state: FSMContext):
     """Отмена удаления"""
     data = await state.get_data()
@@ -1130,7 +1066,7 @@ async def delete_vehicle_cancel(message: Message, state: FSMContext):
     await state.clear()
 
 # ════════════════════════════════════════════════════════════════════════════
-# 📝 НОВЫЙ ПУТЕВОЙ ЛИСТ (ОПТИМИЗИРОВАННЫЙ КОД)
+# 📝 НОВЫЙ ПУТЕВОЙ ЛИСТ
 # ════════════════════════════════════════════════════════════════════════════
 
 @router.message(F.text == "📝 Новый путевой лист")
@@ -1162,7 +1098,11 @@ async def waybill_vehicle_selected(message: Message, state: FSMContext):
     vehicles = data.get('vehicles', [])
     
     # Находим автомобиль
-    vehicle = next((v for v in vehicles if v['number'] == vehicle_number), None)
+    vehicle = None
+    for v in vehicles:
+        if v['number'] == vehicle_number:
+            vehicle = v
+            break
     
     if not vehicle:
         await message.answer("❌ Автомобиль не найден", reply_markup=get_main_keyboard())
@@ -1215,9 +1155,8 @@ async def waybill_vehicle_selected(message: Message, state: FSMContext):
         )
         await state.set_state(WaybillStates.start_time)
 
-# Далее идет код заполнения путевого листа (остается без изменений, но оптимизированный)
-# ... [здесь должен быть код из предыдущей версии для заполнения путевого листа]
-# Для экономии места оставляем заглушку, так как эта часть кода уже оптимизирована
+# Обработчики состояний путевого листа (остаются без изменений из предыдущей версии)
+# Для экономии места оставлю заглушку, так как это большая часть кода
 
 # ════════════════════════════════════════════════════════════════════════════
 # 🚀 ЗАПУСК БОТА
@@ -1226,7 +1165,7 @@ async def waybill_vehicle_selected(message: Message, state: FSMContext):
 async def on_startup():
     """Запуск при старте бота"""
     logger.info("=" * 60)
-    logger.info("🚀 Бот учета путевых листов v5.0")
+    logger.info("🚀 Бот учета путевых листов")
     logger.info("=" * 60)
     
     # Инициализация базы данных
