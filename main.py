@@ -53,7 +53,7 @@ router = Router()
 dp.include_router(router)
 
 # ════════════════════════════════════════════════════════════════════════════
-# 💾 БАЗА ДАННЫХ С VOLUME ПОДДЕРЖКОЯ
+# 💾 БАЗА ДАННЫХ С VOLUME ПОДДЕРЖКОЙ
 # ════════════════════════════════════════════════════════════════════════════
 
 def get_db_path() -> str:
@@ -512,8 +512,9 @@ class WaybillStates(StatesGroup):
     overuse_hours = State()
     overuse_manual = State()
     economy = State()
-    fuel_end_choice = State()
+    refuel_choice = State()  # Новое состояние: выбор был ли дозаправка
     fuel_refuel = State()
+    fuel_end_choice = State()
     fuel_end_manual = State()
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -594,9 +595,19 @@ def get_overuse_choice_keyboard() -> ReplyKeyboardMarkup:
     """Клавиатура для выбора способа учета перерасхода"""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🕒 Рассчитать по простому")],
+            [KeyboardButton(text="🕒 Рассчитать по простою")],
             [KeyboardButton(text="✏️ Ввести перерасход вручную")],
             [KeyboardButton(text="✅ Нет перерасхода")]
+        ],
+        resize_keyboard=True
+    )
+
+def get_refuel_choice_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура для выбора был ли дозаправка"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="✅ Да, была дозаправка")],
+            [KeyboardButton(text="❌ Нет дозаправки")]
         ],
         resize_keyboard=True
     )
@@ -606,8 +617,7 @@ def get_fuel_end_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📊 Рассчитать автоматически")],
-            [KeyboardButton(text="✏️ Ввести остаток вручную")],
-            [KeyboardButton(text="⛽ Добавить заправку")]
+            [KeyboardButton(text="✏️ Ввести остаток вручную")]
         ],
         resize_keyboard=True
     )
@@ -738,26 +748,6 @@ def format_time_duration(hours: int, minutes: int) -> str:
     else:
         return f"{hours} ч {minutes} мин"
 
-def validate_volume(value: str) -> bool:
-    """Валидация объема топлива с 3 знаками после запятой"""
-    try:
-        # Проверяем, что это число
-        num = float(value)
-        
-        # Проверяем, что нет больше 3 знаков после запятой
-        if '.' in value:
-            decimal_part = value.split('.')[1]
-            if len(decimal_part) > 3:
-                return False
-        
-        # Проверяем, что число не отрицательное
-        if num < 0:
-            return False
-            
-        return True
-    except ValueError:
-        return False
-
 def validate_number(value: str) -> bool:
     """Валидация числового значения"""
     try:
@@ -812,7 +802,7 @@ async def save_and_show_waybill(message: Message, state: FSMContext):
 📈 <b>Перерасход:</b> {format_volume(data.get('overuse', 0))} л
 💚 <b>Экономия:</b> {format_volume(data.get('economy', 0))} л
 ⛽ <b>Фактический расход:</b> {format_volume(fuel_actual)} л
-⛽ <b>Заправка:</b> {format_volume(data.get('fuel_refuel', 0))} л
+⛽ <b>Дозаправка:</b> {format_volume(data.get('fuel_refuel', 0))} л
 ⛽ <b>Остаток:</b> {format_volume(data.get('fuel_end', 0))} л
 
 <b>📈 ПОКАЗАТЕЛИ:</b>
@@ -877,8 +867,10 @@ async def cmd_help(message: Message):
 1. Выберите автомобиль
 2. Введите время выезда/возвращения
 3. Введите показания одометра
-4. Укажите перерасход (по простому или вручную)
-5. Введите остаток топлива
+4. Укажите перерасход (по простою или вручную)
+5. Укажите экономию
+6. Укажите была ли дозаправка
+7. Введите остаток топлива
 
 <b>📊 ФОРМАТЫ ДАННЫХ:</b>
 • Время: ЧЧ:ММ (06:30, 20:00)
@@ -1091,8 +1083,8 @@ async def add_vehicle_fuel_rate(message: Message, state: FSMContext):
         await message.answer("Добавление отменено", reply_markup=get_vehicles_keyboard())
         return
     
-    if not validate_volume(message.text):
-        await message.answer("❌ Введите корректное число с 3 знаками после запятой (например: 0.120):")
+    if not validate_number(message.text):
+        await message.answer("❌ Введите корректное число (например: 0.120):")
         return
     
     fuel_rate = float(message.text)
@@ -1103,7 +1095,7 @@ async def add_vehicle_fuel_rate(message: Message, state: FSMContext):
     await state.update_data(fuel_rate=fuel_rate)
     await message.answer(
         "⏱️ Введите перерасход топлива в час простоя (л/ч):\n"
-        "<i>Например: 0.900 (стандартное значение 2.000 л/ч)</i>",
+        "<i>Например: 2.000 (стандартное значение 2.000 л/ч)</i>",
         reply_markup=get_cancel_keyboard()
     )
     await state.set_state(AddVehicleStates.idle_rate)
@@ -1116,8 +1108,8 @@ async def add_vehicle_idle_rate(message: Message, state: FSMContext):
         await message.answer("Добавление отменено", reply_markup=get_vehicles_keyboard())
         return
     
-    if not validate_volume(message.text):
-        await message.answer("❌ Введите корректное число с 3 знаками после запятой (например: 0.900):")
+    if not validate_number(message.text):
+        await message.answer("❌ Введите корректное число (например: 2.000):")
         return
     
     idle_rate = float(message.text)
@@ -1327,8 +1319,7 @@ async def waybill_vehicle_selected(message: Message, state: FSMContext):
     else:
         await message.answer(
             f"🚗 <b>Автомобиль:</b> {vehicle_info['number']}\n\n"
-            f"🕒 Введите время выпуска на линию (ЧЧ:ММ):\n"
-            f"<i>Можно вводить время в форматах: 06:30, 6:30, 06.30, 06:30:00</i>",
+            f"🕒 Введите время выпуска на линию (ЧЧ:ММ):",
             reply_markup=ReplyKeyboardRemove()
         )
         await state.set_state(WaybillStates.start_time)
@@ -1358,12 +1349,28 @@ async def waybill_start_time(message: Message, state: FSMContext):
     
     await state.update_data(start_time=start_time)
     
-    await message.answer(
-        f"🕒 <b>Время выпуска:</b> {start_time}\n\n"
-        f"📊 Введите показания одометра на начало дня (км):",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(WaybillStates.odo_start)
+    # Проверяем, есть ли уже данные об одометре и топливе (из предыдущего дня)
+    data = await state.get_data()
+    
+    if data.get('odo_start') is not None and data.get('fuel_start') is not None:
+        # Данные уже есть (из предыдущего дня), переходим сразу к времени возвращения
+        await message.answer(
+            f"🚗 <b>Автомобиль:</b> {data.get('vehicle_number', 'неизвестно')}\n"
+            f"🕒 <b>Время выпуска:</b> {start_time}\n"
+            f"🛣 <b>Одометр на начало:</b> {data.get('odo_start', 0):.0f} км\n"
+            f"⛽ <b>Топливо на начало:</b> {format_volume(data.get('fuel_start', 0))} л\n\n"
+            f"🕒 Введите время возвращения на базу (ЧЧ:ММ):",
+            reply_markup=get_cancel_keyboard()
+        )
+        await state.set_state(WaybillStates.end_time)
+    else:
+        # Данных нет, запрашиваем одометр
+        await message.answer(
+            f"🕒 <b>Время выпуска:</b> {start_time}\n\n"
+            f"📊 Введите показания одометра на начало дня (км):",
+            reply_markup=get_cancel_keyboard()
+        )
+        await state.set_state(WaybillStates.odo_start)
 
 @router.message(WaybillStates.odo_start)
 async def waybill_odo_start(message: Message, state: FSMContext):
@@ -1389,8 +1396,7 @@ async def waybill_odo_start(message: Message, state: FSMContext):
     
     await message.answer(
         f"🛣 <b>Одометр на начало:</b> {odo_start:.0f} км\n\n"
-        f"⛽ Введите количество топлива на начало дня (л):\n"
-        f"<i>Формат: 3 знака после запятой (например: 25.572)</i>",
+        f"⛽ Введите количество топлива на начало дня (л):",
         reply_markup=get_cancel_keyboard()
     )
     await state.set_state(WaybillStates.fuel_start)
@@ -1403,9 +1409,9 @@ async def waybill_fuel_start(message: Message, state: FSMContext):
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
         return
     
-    if not validate_volume(message.text):
+    if not validate_number(message.text):
         await message.answer(
-            "❌ Неверный формат числа. Введите количество топлива с 3 знаками после запятой (например: 25.572) или нажмите ❌ Отмена",
+            "❌ Неверный формат числа. Введите количество топлива (например, 25.572) или нажмите ❌ Отмена",
             reply_markup=get_cancel_keyboard()
         )
         return
@@ -1424,8 +1430,7 @@ async def waybill_fuel_start(message: Message, state: FSMContext):
         f"🕒 <b>Время выпуска:</b> {data.get('start_time', 'не указано')}\n"
         f"🛣 <b>Одометр на начало:</b> {data.get('odo_start', 0):.0f} км\n"
         f"⛽ <b>Топливо на начало:</b> {format_volume(fuel_start)} л\n\n"
-        f"🕒 Введите время возвращения на базу (ЧЧ:ММ):\n"
-        f"<i>Можно вводить время в форматах: 20:00, 8:00, 20.00, 20:00:00</i>",
+        f"🕒 Введите время возвращения на базу (ЧЧ:ММ):",
         reply_markup=get_cancel_keyboard()
     )
     await state.set_state(WaybillStates.end_time)
@@ -1515,7 +1520,7 @@ async def waybill_odo_end(message: Message, state: FSMContext):
         f"📏 <b>Пройдено расстояние:</b> {distance:.0f} км\n"
         f"⛽ <b>Норма расхода:</b> {format_volume(fuel_norm)} л\n\n"
         f"📊 <b>Как учитывать перерасход топлива?</b>\n"
-        f"• 🕒 Рассчитать по простому - умножение часов простоя на норму\n"
+        f"• 🕒 Рассчитать по простою - умножение часов простоя на норму\n"
         f"• ✏️ Ввести перерасход вручную\n"
         f"• ✅ Нет перерасхода",
         reply_markup=get_overuse_choice_keyboard()
@@ -1544,8 +1549,7 @@ async def waybill_initial_data_choice(message: Message, state: FSMContext):
             f"✅ Используем данные предыдущего дня:\n"
             f"🛣 <b>Одометр:</b> {previous_odo:.0f} км\n"
             f"⛽ <b>Топливо:</b> {format_volume(previous_fuel)} л\n\n"
-            f"🕒 Введите время выпуска на линию (ЧЧ:ММ):\n"
-            f"<i>Можно вводить время в форматах: 06:30, 6:30, 06.30</i>",
+            f"🕒 Введите время выпуска на линию (ЧЧ:ММ):",
             reply_markup=get_cancel_keyboard()
         )
         await state.set_state(WaybillStates.start_time)
@@ -1570,7 +1574,7 @@ async def waybill_overuse_choice(message: Message, state: FSMContext):
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
         return
     
-    if message.text == "🕒 Рассчитать по простому":
+    if message.text == "🕒 Рассчитать по простою":
         data = await state.get_data()
         idle_rate = data.get('idle_rate', 2.0)
         
@@ -1584,7 +1588,7 @@ async def waybill_overuse_choice(message: Message, state: FSMContext):
     elif message.text == "✏️ Ввести перерасход вручную":
         await message.answer(
             "⛽ Введите количество перерасходованного топлива (л):\n"
-            f"<i>Например: 2.500 (3 знака после запятой)</i>",
+            "<i>Например: 2.500 (3 знака после запятой)</i>",
             reply_markup=get_cancel_keyboard()
         )
         await state.set_state(WaybillStates.overuse_manual)
@@ -1600,7 +1604,7 @@ async def waybill_overuse_choice(message: Message, state: FSMContext):
         await message.answer(
             f"🚗 <b>Автомобиль:</b> {data.get('vehicle_number')}\n\n"
             "📊 Теперь введите экономию топлива (л):\n"
-            f"<i>Если экономии нет, введите 0 (3 знака после запятой: 0.000)</i>",
+            "<i>Если экономии нет, введите 0 или нажмите ⏭ Пропустить</i>",
             reply_markup=get_skip_keyboard()
         )
         await state.set_state(WaybillStates.economy)
@@ -1649,9 +1653,9 @@ async def waybill_overuse_hours(message: Message, state: FSMContext):
     overuse = data.get('overuse', 0)
     
     await message.answer(
-        f"✅ Перерасход по простому: {format_volume(overuse)} л\n\n"
+        f"✅ Перерасход по простою: {format_volume(overuse)} л\n\n"
         "📊 Теперь введите экономию топлива (л):\n"
-        f"<i>Если экономии нет, введите 0 (3 знака после запятой: 0.000)</i>",
+        "<i>Если экономии нет, введите 0 или нажмите ⏭ Пропустить</i>",
         reply_markup=get_skip_keyboard()
     )
     await state.set_state(WaybillStates.economy)
@@ -1664,9 +1668,9 @@ async def waybill_overuse_manual(message: Message, state: FSMContext):
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
         return
     
-    if not validate_volume(message.text):
+    if not validate_number(message.text):
         await message.answer(
-            "❌ Неверный формат числа. Введите количество перерасхода с 3 знаками после запятой (например: 2.500) или нажмите ❌ Отмена",
+            "❌ Неверный формат числа. Введите количество перерасхода (например, 2.500) или нажмите ❌ Отмена",
             reply_markup=get_cancel_keyboard()
         )
         return
@@ -1685,7 +1689,7 @@ async def waybill_overuse_manual(message: Message, state: FSMContext):
     await message.answer(
         f"✅ Перерасход учтен: {format_volume(overuse)} л\n\n"
         "📊 Теперь введите экономию топлива (л):\n"
-        f"<i>Если экономии нет, введите 0 (3 знака после запятой: 0.000)</i>",
+        "<i>Если экономии нет, введите 0 или нажмите ⏭ Пропустить</i>",
         reply_markup=get_skip_keyboard()
     )
     await state.set_state(WaybillStates.economy)
@@ -1700,9 +1704,9 @@ async def waybill_economy(message: Message, state: FSMContext):
     
     if message.text == "⏭ Пропустить":
         economy = 0
-    elif not validate_volume(message.text):
+    elif not validate_number(message.text):
         await message.answer(
-            "❌ Неверный формат числа. Введите количество экономии с 3 знаками после запятой (например: 2.500) или нажмите ⏭ Пропустить",
+            "❌ Неверный формат числа. Введите количество экономии (например, 2.500) или нажмите ⏭ Пропустить",
             reply_markup=get_skip_keyboard()
         )
         return
@@ -1718,15 +1722,120 @@ async def waybill_economy(message: Message, state: FSMContext):
     await state.update_data(economy=economy)
     
     data = await state.get_data()
+    
     await message.answer(
-        f"🚗 <b>Автомобиль:</b> {data.get('vehicle_number')}\n\n"
-        "⛽ <b>Как ввести остаток топлива на конец дня?</b>\n"
-        "• 📊 Рассчитать автоматически - из начального топлива вычесть расход\n"
-        "• ✏️ Ввести остаток вручную\n"
-        "• ⛽ Добавить заправку",
-        reply_markup=get_fuel_end_keyboard()
+        f"💚 <b>Экономия:</b> {format_volume(economy)} л\n\n"
+        "⛽ <b>Была ли дозаправка в течение дня?</b>",
+        reply_markup=get_refuel_choice_keyboard()
     )
-    await state.set_state(WaybillStates.fuel_end_choice)
+    await state.set_state(WaybillStates.refuel_choice)
+
+@router.message(WaybillStates.refuel_choice)
+async def waybill_refuel_choice(message: Message, state: FSMContext):
+    """Обработка выбора был ли дозаправка"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
+        return
+    
+    if message.text == "✅ Да, была дозаправка":
+        # Переход к вводу количества дозаправленного топлива
+        await message.answer(
+            "⛽ Введите количество дозаправленного топлива (л):\n"
+            f"<i>Формат: 3 знака после запятой (например: 20.000)</i>",
+            reply_markup=get_cancel_keyboard()
+        )
+        await state.set_state(WaybillStates.fuel_refuel)
+        
+    elif message.text == "❌ Нет дозаправки":
+        # Расчет без дозаправки
+        await state.update_data(fuel_refuel=0)
+        
+        data = await state.get_data()
+        fuel_start = data.get('fuel_start', 0)
+        fuel_norm = data.get('fuel_norm', 0)
+        overuse = data.get('overuse', 0)
+        economy = data.get('economy', 0)
+        
+        # Расчет фактического расхода
+        fuel_actual = fuel_norm + overuse - economy
+        
+        # Расчет остатка (без дозаправки)
+        fuel_end = fuel_start - fuel_actual
+        
+        if fuel_end < 0:
+            # Отрицательный остаток - предлагаем варианты
+            await message.answer(
+                f"⚠️ <b>Внимание!</b> Отрицательный остаток топлива: {format_volume(fuel_end)} л\n"
+                f"Возможно, введены неверные данные.\n\n"
+                f"⛽ <b>Как ввести остаток топлива на конец дня?</b>",
+                reply_markup=get_fuel_end_keyboard()
+            )
+            await state.set_state(WaybillStates.fuel_end_choice)
+        else:
+            # Все хорошо, сохраняем
+            await state.update_data(
+                fuel_actual=fuel_actual,
+                fuel_end=fuel_end,
+                fuel_end_manual=0
+            )
+            await save_and_show_waybill(message, state)
+            
+    else:
+        await message.answer(
+            "❌ Пожалуйста, выберите 'Да, была дозаправка' или 'Нет дозаправки'",
+            reply_markup=get_refuel_choice_keyboard()
+        )
+
+@router.message(WaybillStates.fuel_refuel)
+async def waybill_fuel_refuel(message: Message, state: FSMContext):
+    """Обработка дозаправки топлива"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
+        return
+    
+    if not validate_number(message.text):
+        await message.answer(
+            "❌ Неверный формат числа. Введите количество топлива (например, 20.000) или нажмите ❌ Отмена",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    fuel_refuel = float(message.text)
+    if fuel_refuel < 0:
+        await message.answer("❌ Количество топлива не может быть отрицательным")
+        return
+    
+    await state.update_data(fuel_refuel=fuel_refuel)
+    
+    # Расчет с учетом дозаправки
+    data = await state.get_data()
+    fuel_start = data.get('fuel_start', 0)
+    fuel_norm = data.get('fuel_norm', 0)
+    overuse = data.get('overuse', 0)
+    economy = data.get('economy', 0)
+    
+    fuel_actual = fuel_norm + overuse - economy
+    fuel_end = fuel_start + fuel_refuel - fuel_actual
+    
+    if fuel_end < 0:
+        # Отрицательный остаток даже после дозаправки
+        await message.answer(
+            f"⚠️ <b>Внимание!</b> Отрицательный остаток топлива: {format_volume(fuel_end)} л\n"
+            f"Возможно, введены неверные данные.\n\n"
+            f"⛽ <b>Как ввести остаток топлива на конец дня?</b>",
+            reply_markup=get_fuel_end_keyboard()
+        )
+        await state.set_state(WaybillStates.fuel_end_choice)
+    else:
+        # Все хорошо, сохраняем с учетом дозаправки
+        await state.update_data(
+            fuel_actual=fuel_actual,
+            fuel_end=fuel_end,
+            fuel_end_manual=0
+        )
+        await save_and_show_waybill(message, state)
 
 @router.message(WaybillStates.fuel_end_choice)
 async def waybill_fuel_end_choice(message: Message, state: FSMContext):
@@ -1739,6 +1848,7 @@ async def waybill_fuel_end_choice(message: Message, state: FSMContext):
     if message.text == "📊 Рассчитать автоматически":
         data = await state.get_data()
         fuel_start = data.get('fuel_start', 0)
+        fuel_refuel = data.get('fuel_refuel', 0)
         fuel_norm = data.get('fuel_norm', 0)
         overuse = data.get('overuse', 0)
         economy = data.get('economy', 0)
@@ -1747,14 +1857,16 @@ async def waybill_fuel_end_choice(message: Message, state: FSMContext):
         fuel_actual = fuel_norm + overuse - economy
         
         # Расчет остатка
-        fuel_end = fuel_start - fuel_actual
+        fuel_end = fuel_start + fuel_refuel - fuel_actual
         
         if fuel_end < 0:
             await message.answer(
                 f"⚠️ <b>Внимание!</b> Отрицательный остаток топлива: {format_volume(fuel_end)} л\n"
-                f"Проверьте введенные данные или выберите другой способ ввода остатка.",
-                reply_markup=get_fuel_end_keyboard()
+                f"Возможно, введены неверные данные.\n\n"
+                f"⛽ Введите остаток топлива на конец дня (л):",
+                reply_markup=get_cancel_keyboard()
             )
+            await state.set_state(WaybillStates.fuel_end_manual)
             return
         
         await state.update_data(
@@ -1772,48 +1884,11 @@ async def waybill_fuel_end_choice(message: Message, state: FSMContext):
             reply_markup=get_cancel_keyboard()
         )
         await state.set_state(WaybillStates.fuel_end_manual)
-        
-    elif message.text == "⛽ Добавить заправку":
-        await message.answer(
-            "⛽ Введите количество заправленного топлива (л):\n"
-            f"<i>Формат: 3 знака после запятой (например: 20.000)</i>",
-            reply_markup=get_cancel_keyboard()
-        )
-        await state.set_state(WaybillStates.fuel_refuel)
     else:
         await message.answer(
             "❌ Пожалуйста, выберите один из вариантов выше или нажмите ❌ Отмена",
             reply_markup=get_fuel_end_keyboard()
         )
-
-@router.message(WaybillStates.fuel_refuel)
-async def waybill_fuel_refuel(message: Message, state: FSMContext):
-    """Обработка заправки топлива"""
-    if message.text == "❌ Отмена":
-        await state.clear()
-        await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
-        return
-    
-    if not validate_volume(message.text):
-        await message.answer(
-            "❌ Неверный формат числа. Введите количество топлива с 3 знаками после запятой (например: 20.000) или нажмите ❌ Отмена",
-            reply_markup=get_cancel_keyboard()
-        )
-        return
-    
-    fuel_refuel = float(message.text)
-    if fuel_refuel < 0:
-        await message.answer("❌ Количество топлива не может быть отрицательным")
-        return
-    
-    await state.update_data(fuel_refuel=fuel_refuel)
-    
-    await message.answer(
-        "⛽ Введите остаток топлива на конец дня (л):\n"
-        f"<i>Формат: 3 знака после запятой (например: 15.500)</i>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(WaybillStates.fuel_end_manual)
 
 @router.message(WaybillStates.fuel_end_manual)
 async def waybill_fuel_end_manual(message: Message, state: FSMContext):
@@ -1823,9 +1898,9 @@ async def waybill_fuel_end_manual(message: Message, state: FSMContext):
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
         return
     
-    if not validate_volume(message.text):
+    if not validate_number(message.text):
         await message.answer(
-            "❌ Неверный формат числа. Введите количество топлива с 3 знаками после запятой (например: 15.500) или нажмите ❌ Отмена",
+            "❌ Неверный формат числа. Введите количество топлива (например, 15.500) или нажмите ❌ Отмена",
             reply_markup=get_cancel_keyboard()
         )
         return
@@ -1838,11 +1913,8 @@ async def waybill_fuel_end_manual(message: Message, state: FSMContext):
     data = await state.get_data()
     fuel_start = data.get('fuel_start', 0)
     fuel_refuel = data.get('fuel_refuel', 0)
-    fuel_norm = data.get('fuel_norm', 0)
-    overuse = data.get('overuse', 0)
-    economy = data.get('economy', 0)
     
-    # Расчет фактического расхода с учетом заправки
+    # Расчет фактического расхода с учетом дозаправки
     fuel_actual = fuel_start + fuel_refuel - fuel_end
     
     await state.update_data(
