@@ -93,13 +93,37 @@ async def get_db():
         conn.close()
 
 def init_database():
-    """Инициализация базы данных при старте"""
+    """Инициализация базы данных при старте с миграцией"""
     try:
         db_path = get_db_path()
         logger.info(f"🔄 Инициализация базы данных по пути: {db_path}")
         
         conn = sqlite3.connect(db_path, check_same_thread=False)
         cursor = conn.cursor()
+        
+        # Проверяем существование таблицы vehicles
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vehicles'")
+        vehicles_exists = cursor.fetchone() is not None
+        
+        if vehicles_exists:
+            # Проверяем структуру существующей таблицы
+            cursor.execute("PRAGMA table_info(vehicles)")
+            columns = {row[1] for row in cursor.fetchall()}
+            
+            # Удаляем старую таблицу если структура не совпадает
+            required_columns = {'id', 'number', 'fuel_rate', 'idle_rate', 'created_at'}
+            if not required_columns.issubset(columns) or 'updated_at' in columns:
+                logger.info("🔄 Обнаружена старая структура БД, выполняю миграцию...")
+                
+                # Сохраняем данные
+                cursor.execute("SELECT number, fuel_rate, idle_rate FROM vehicles")
+                old_vehicles = cursor.fetchall()
+                
+                # Удаляем старые таблицы
+                cursor.execute("DROP TABLE IF EXISTS waybills")
+                cursor.execute("DROP TABLE IF EXISTS vehicles")
+                
+                logger.info(f"📦 Сохранено {len(old_vehicles)} автомобилей для миграции")
         
         # Таблица автомобилей
         cursor.execute('''
@@ -111,6 +135,18 @@ def init_database():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        
+        # Восстанавливаем данные после миграции
+        if vehicles_exists and 'old_vehicles' in locals():
+            for vehicle in old_vehicles:
+                try:
+                    cursor.execute(
+                        "INSERT INTO vehicles (number, fuel_rate, idle_rate) VALUES (?, ?, ?)",
+                        vehicle
+                    )
+                except sqlite3.IntegrityError:
+                    pass  # Пропускаем дубликаты
+            logger.info(f"✅ Восстановлено {len(old_vehicles)} автомобилей")
         
         # Таблица путевых листов
         cursor.execute('''
@@ -520,8 +556,48 @@ async def cmd_help(message: Message):
 /help - Эта справка
 /cancel - Отмена действия
 /stats - Статистика бота
+/resetdb - Сброс базы данных (⚠️ удалит все данные)
 """
     await message.answer(help_text)
+
+@router.message(Command("resetdb"))
+async def cmd_reset_db(message: Message):
+    """Команда для сброса базы данных"""
+    try:
+        db_path = get_db_path()
+        
+        # Получаем информацию перед удалением
+        db_info = Database.get_database_info()
+        
+        # Закрываем все соединения
+        import gc
+        gc.collect()
+        
+        # Удаляем файл базы данных
+        if os.path.exists(db_path):
+            os.remove(db_path)
+            logger.info(f"🗑️ База данных удалена: {db_path}")
+        
+        # Создаем новую базу
+        init_database()
+        
+        await message.answer(
+            f"<b>✅ БАЗА ДАННЫХ СБРОШЕНА</b>\n\n"
+            f"🗑️ Удалено:\n"
+            f"• Автомобилей: {db_info.get('vehicles_count', 0)}\n"
+            f"• Путевых листов: {db_info.get('waybills_count', 0)}\n\n"
+            f"🆕 Создана новая пустая база данных\n\n"
+            f"<i>Вы можете начать добавлять автомобили заново</i>",
+            reply_markup=get_main_keyboard()
+        )
+        logger.info(f"✅ Пользователь {message.from_user.id} сбросил базу данных")
+    except Exception as e:
+        logger.error(f"❌ Ошибка сброса БД: {e}")
+        await message.answer(
+            f"❌ Ошибка при сбросе базы данных: {e}\n\n"
+            f"Попробуйте перезапустить бота на Railway",
+            reply_markup=get_main_keyboard()
+        )
 
 @router.message(Command("cancel"))
 @router.message(F.text == "❌ Отмена")
