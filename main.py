@@ -3,14 +3,14 @@ import logging
 import os
 import sqlite3
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
     Message, ReplyKeyboardMarkup, KeyboardButton,
-    ReplyKeyboardRemove, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+    ReplyKeyboardRemove
 )
-from aiogram.filters import Command, CommandStart, CommandObject
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -18,87 +18,95 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
 # ════════════════════════════════════════════════════════════════════════════
-# ⚙️ НАСТРОЙКА ЛОГИРОВАНИЯ
+# ⚙️  НАСТРОЙКА ЛОГИРОВАНИЯ ДЛЯ RAILWAY
 # ════════════════════════════════════════════════════════════════════════════
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(),
+        logging.StreamHandler(),  # Для Railway логов
         logging.FileHandler('bot.log', encoding='utf-8')
     ]
 )
 logger = logging.getLogger(__name__)
 
 # ════════════════════════════════════════════════════════════════════════════
-# 🔐 КОНФИГУРАЦИЯ
+# 🔐 КОНФИГУРАЦИЯ ЧЕРЕЗ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ (ДЛЯ RAILWAY)
 # ════════════════════════════════════════════════════════════════════════════
 
+# Получение токена из переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 if not BOT_TOKEN:
-    logger.error("❌ BOT_TOKEN не найден!")
+    logger.error("❌ BOT_TOKEN не найден в переменных окружения!")
+    logger.info("📝 На Railway добавьте переменную окружения BOT_TOKEN")
+    logger.info("📝 Локально: создайте .env файл с BOT_TOKEN=ваш_токен")
     exit(1)
 
-logger.info("✅ Бот инициализирован")
+logger.info("✅ Бот инициализирован, токен получен")
 
 # ════════════════════════════════════════════════════════════════════════════
-# 🤖 ИНИЦИАЛИЗАЦИЯ БОТА
+# 🤖 ИНИЦИАЛИЗАЦИЯ БОТА И ДИСПЕТЧЕРА
 # ════════════════════════════════════════════════════════════════════════════
 
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+
+# Используем MemoryStorage для Railway
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
 dp.include_router(router)
 
 # ════════════════════════════════════════════════════════════════════════════
-# 💾 БАЗА ДАННЫХ С VOLUME ПОДДЕРЖКОЙ
+# 💾 НАСТРОЙКА БАЗЫ ДАННЫХ С ПОДДЕРЖКОЙ VOLUME
 # ════════════════════════════════════════════════════════════════════════════
 
 def get_db_path() -> str:
-    """Определяет путь к базе данных с учетом Volume"""
+    """Определяет путь к базе данных с учетом Volume в Railway"""
+    # Проверяем наличие папки /data (куда монтируется Volume в Railway)
     if os.path.exists('/data'):
         db_dir = '/data'
-        logger.info("✅ Volume /data обнаружен")
+        logger.info("✅ Обнаружен Volume /data для хранения базы данных")
     else:
-        db_dir = '.'
-        logger.info("📁 Используется локальная папка")
+        db_dir = '.'  # Локальная папка для разработки
+        logger.info("📁 Используется локальная папка для базы данных")
     
+    # Создаем папку если не существует
     os.makedirs(db_dir, exist_ok=True)
+    
+    # Путь к файлу базы данных
     db_path = os.path.join(db_dir, 'waybills.db')
-    logger.info(f"📊 Путь к БД: {db_path}")
+    logger.info(f"📊 Путь к базе данных: {db_path}")
     return db_path
 
 def get_db_connection():
-    """Создание подключения к SQLite"""
+    """Создание подключения к SQLite базе данных"""
     db_path = get_db_path()
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    # Включаем foreign keys и оптимизируем
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 def init_database():
-    """Инициализация базы данных"""
+    """Инициализация базы данных при старте"""
     try:
         db_path = get_db_path()
-        logger.info(f"🔄 Инициализация БД: {db_path}")
+        logger.info(f"🔄 Инициализация базы данных по пути: {db_path}")
         
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Таблица автомобилей
+        # Таблица автомобилей (ДОБАВЛЕНО ПОЛЕ ДЛЯ ПРОСТОЯ)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS vehicles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 number TEXT UNIQUE NOT NULL,
-                fuel_rate REAL NOT NULL CHECK(fuel_rate > 0 AND fuel_rate <= 5),
-                idle_rate REAL DEFAULT 2.0 CHECK(idle_rate > 0 AND idle_rate <= 10),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                fuel_rate REAL NOT NULL,
+                idle_rate REAL DEFAULT 2.0,  -- НОВОЕ ПОЛЕ: перерасход в час простоя (л/ч)
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
@@ -111,48 +119,29 @@ def init_database():
                 date TEXT NOT NULL,
                 start_time TEXT,
                 end_time TEXT,
-                total_hours REAL DEFAULT 0,
-                odo_start REAL DEFAULT 0,
-                odo_end REAL DEFAULT 0,
-                distance REAL DEFAULT 0,
-                fuel_start REAL DEFAULT 0,
-                fuel_end REAL DEFAULT 0,
-                fuel_refuel REAL DEFAULT 0,
-                fuel_norm REAL DEFAULT 0,
-                fuel_actual REAL DEFAULT 0,
+                total_hours REAL,
+                odo_start REAL,
+                odo_end REAL,
+                distance REAL,
+                fuel_start REAL,
+                fuel_end REAL,
+                fuel_refuel REAL DEFAULT 0,  -- НОВОЕ ПОЛЕ: заправленное топливо
+                fuel_norm REAL,
+                fuel_actual REAL,
                 overuse REAL DEFAULT 0,
-                overuse_hours REAL DEFAULT 0,
-                overuse_calculated INTEGER DEFAULT 0,
+                overuse_hours REAL DEFAULT 0,  -- НОВОЕ ПОЛЕ: часы простоя для расчета перерасхода
+                overuse_calculated INTEGER DEFAULT 0,  -- НОВОЕ ПОЛЕ: флаг расчета перерасхода по простому
                 economy REAL DEFAULT 0,
-                fuel_rate REAL DEFAULT 0,
-                fuel_end_manual INTEGER DEFAULT 0,
+                fuel_rate REAL,
+                fuel_end_manual INTEGER DEFAULT 0,  -- НОВОЕ: флаг ручного ввода
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (vehicle_id) REFERENCES vehicles (id) ON DELETE CASCADE
+                FOREIGN KEY (vehicle_id) REFERENCES vehicles (id)
             )
         ''')
         
-        # Триггер для обновления updated_at
-        cursor.execute('''
-            CREATE TRIGGER IF NOT EXISTS update_vehicles_timestamp 
-            AFTER UPDATE ON vehicles 
-            BEGIN
-                UPDATE vehicles SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
-            END
-        ''')
-        
-        # Оптимизированные индексы
-        cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_vehicles_number 
-            ON vehicles(number)
-        ''')
-        cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_waybills_vehicle_user_date 
-            ON waybills(vehicle_id, user_id, date DESC)
-        ''')
-        cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_waybills_date 
-            ON waybills(date DESC)
-        ''')
+        # Индексы для улучшения производительности
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_waybills_user_date ON waybills(user_id, date)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_waybills_vehicle_date ON waybills(vehicle_id, date)')
         
         conn.commit()
         conn.close()
@@ -161,25 +150,13 @@ def init_database():
         logger.error(f"❌ Ошибка инициализации БД: {e}")
 
 # ════════════════════════════════════════════════════════════════════════════
-# 📊 КЛАСС ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ (ОПТИМИЗИРОВАННЫЙ)
+# 📊 КЛАСС ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ
 # ════════════════════════════════════════════════════════════════════════════
 
 class Database:
-    # Кэш для часто запрашиваемых данных
-    _vehicles_cache = {}
-    _cache_timeout = 300  # 5 минут
-    
-    @staticmethod
-    def _clear_cache():
-        """Очистка кэша"""
-        current_time = datetime.now().timestamp()
-        for key in list(Database._vehicles_cache.keys()):
-            if current_time - Database._vehicles_cache[key]['timestamp'] > Database._cache_timeout:
-                del Database._vehicles_cache[key]
-    
     @staticmethod
     def add_vehicle(number: str, fuel_rate: float, idle_rate: float = 2.0) -> Optional[int]:
-        """Добавление нового автомобиля"""
+        """Добавление нового автомобиля (ДОБАВЛЕН ПРОСТОЙ)"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -190,10 +167,7 @@ class Database:
             conn.commit()
             vehicle_id = cursor.lastrowid
             conn.close()
-            
-            # Очищаем кэш
-            Database._vehicles_cache.clear()
-            logger.info(f"✅ Добавлен автомобиль {number}")
+            logger.info(f"✅ Добавлен автомобиль {number}, простой: {idle_rate} л/ч")
             return vehicle_id
         except sqlite3.IntegrityError:
             logger.warning(f"⚠️ Автомобиль {number} уже существует")
@@ -203,134 +177,35 @@ class Database:
             return None
     
     @staticmethod
-    def get_vehicles(force_refresh: bool = False) -> List[Dict]:
-        """Получение списка автомобилей с кэшированием"""
-        cache_key = 'all_vehicles'
-        
-        # Проверяем кэш если не требуется обновление
-        if not force_refresh and cache_key in Database._vehicles_cache:
-            cache_data = Database._vehicles_cache[cache_key]
-            if datetime.now().timestamp() - cache_data['timestamp'] < Database._cache_timeout:
-                return cache_data['data']
-        
+    def get_vehicles() -> list:
+        """Получение списка автомобилей"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, number, fuel_rate, idle_rate, 
-                       strftime('%Y-%m-%d %H:%M', created_at) as created_at
-                FROM vehicles 
-                ORDER BY number COLLATE NOCASE
-            """)
-            
-            vehicles = []
-            for row in cursor.fetchall():
-                vehicles.append({
-                    'id': row['id'],
-                    'number': row['number'],
-                    'fuel_rate': row['fuel_rate'],
-                    'idle_rate': row['idle_rate'],
-                    'created_at': row['created_at']
-                })
-            
+            cursor.execute("SELECT id, number, fuel_rate, idle_rate FROM vehicles ORDER BY number")
+            vehicles = cursor.fetchall()
             conn.close()
-            
-            # Сохраняем в кэш
-            Database._vehicles_cache[cache_key] = {
-                'data': vehicles,
-                'timestamp': datetime.now().timestamp()
-            }
-            
             return vehicles
         except Exception as e:
             logger.error(f"❌ Ошибка получения списка автомобилей: {e}")
             return []
     
     @staticmethod
-    def get_vehicle(vehicle_id: int) -> Optional[Dict]:
-        """Получение информации об автомобиле по ID"""
+    def get_vehicle(vehicle_id: int):
+        """Получение информации об автомобиле"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, number, fuel_rate, idle_rate,
-                       strftime('%Y-%m-%d %H:%M', created_at) as created_at,
-                       strftime('%Y-%m-%d %H:%M', updated_at) as updated_at
-                FROM vehicles 
-                WHERE id = ?
-            """, (vehicle_id,))
-            
-            row = cursor.fetchone()
+            cursor.execute("SELECT id, number, fuel_rate, idle_rate FROM vehicles WHERE id = ?", (vehicle_id,))
+            vehicle = cursor.fetchone()
             conn.close()
-            
-            if row:
-                return {
-                    'id': row['id'],
-                    'number': row['number'],
-                    'fuel_rate': row['fuel_rate'],
-                    'idle_rate': row['idle_rate'],
-                    'created_at': row['created_at'],
-                    'updated_at': row['updated_at']
-                }
-            return None
+            return vehicle
         except Exception as e:
             logger.error(f"❌ Ошибка получения автомобиля: {e}")
             return None
     
     @staticmethod
-    def search_vehicles(search_term: str) -> List[Dict]:
-        """Поиск автомобилей по номеру"""
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, number, fuel_rate, idle_rate
-                FROM vehicles 
-                WHERE number LIKE ? 
-                OR number LIKE ?
-                ORDER BY number COLLATE NOCASE
-            """, (f'%{search_term.upper()}%', f'%{search_term}%'))
-            
-            vehicles = []
-            for row in cursor.fetchall():
-                vehicles.append(dict(row))
-            
-            conn.close()
-            return vehicles
-        except Exception as e:
-            logger.error(f"❌ Ошибка поиска автомобилей: {e}")
-            return []
-    
-    @staticmethod
-    def delete_vehicle(vehicle_id: int) -> bool:
-        """Удаление автомобиля"""
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            
-            # Получаем информацию перед удалением
-            cursor.execute("SELECT number FROM vehicles WHERE id = ?", (vehicle_id,))
-            vehicle = cursor.fetchone()
-            
-            if not vehicle:
-                conn.close()
-                return False
-            
-            # Удаляем автомобиль (путевые листы удалятся каскадно)
-            cursor.execute("DELETE FROM vehicles WHERE id = ?", (vehicle_id,))
-            conn.commit()
-            conn.close()
-            
-            # Очищаем кэш
-            Database._vehicles_cache.clear()
-            logger.info(f"🗑️ Удален автомобиль {vehicle['number']}")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Ошибка удаления автомобиля: {e}")
-            return False
-    
-    @staticmethod
-    def get_last_waybill(vehicle_id: int, user_id: int) -> Optional[Dict]:
+    def get_last_waybill(vehicle_id: int, user_id: int):
         """Получение последнего путевого листа"""
         try:
             conn = get_db_connection()
@@ -342,13 +217,9 @@ class Database:
                 ORDER BY date DESC, id DESC 
                 LIMIT 1
             ''', (vehicle_id, user_id))
-            
-            row = cursor.fetchone()
+            waybill = cursor.fetchone()
             conn.close()
-            
-            if row:
-                return dict(row)
-            return None
+            return waybill
         except Exception as e:
             logger.error(f"❌ Ошибка получения последнего путевого листа: {e}")
             return None
@@ -359,7 +230,6 @@ class Database:
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
-            
             cursor.execute('''
                 INSERT INTO waybills 
                 (vehicle_id, user_id, date, start_time, end_time, total_hours, 
@@ -389,11 +259,9 @@ class Database:
                 data.get('fuel_rate'),
                 data.get('fuel_end_manual', 0)
             ))
-            
             conn.commit()
             waybill_id = cursor.lastrowid
             conn.close()
-            
             logger.info(f"✅ Сохранен путевой лист #{waybill_id}")
             return waybill_id
         except Exception as e:
@@ -401,7 +269,7 @@ class Database:
             return None
     
     @staticmethod
-    def get_statistics(vehicle_id: int, user_id: int, days: int = 7) -> Optional[Dict]:
+    def get_statistics(vehicle_id: int, user_id: int, days: int = 7):
         """Получение статистики"""
         try:
             conn = get_db_connection()
@@ -409,26 +277,18 @@ class Database:
             cursor.execute('''
                 SELECT 
                     COUNT(*) as trips,
-                    COALESCE(SUM(distance), 0) as total_distance,
-                    COALESCE(SUM(fuel_actual), 0) as total_fuel,
-                    COALESCE(SUM(fuel_refuel), 0) as total_refuel,
-                    COALESCE(SUM(overuse_hours), 0) as total_idle_hours,
-                    CASE 
-                        WHEN COALESCE(SUM(distance), 0) > 0 
-                        THEN COALESCE(SUM(fuel_actual) / SUM(distance) * 100, 0)
-                        ELSE 0
-                    END as avg_consumption
+                    SUM(distance) as total_distance,
+                    SUM(fuel_actual) as total_fuel,
+                    SUM(fuel_refuel) as total_refuel,
+                    SUM(overuse_hours) as total_idle_hours,
+                    AVG(fuel_actual/distance*100) as avg_consumption
                 FROM waybills 
                 WHERE vehicle_id = ? AND user_id = ? 
                 AND date >= date('now', '-' || ? || ' days')
             ''', (vehicle_id, user_id, days))
-            
-            row = cursor.fetchone()
+            stats = cursor.fetchone()
             conn.close()
-            
-            if row:
-                return dict(row)
-            return None
+            return stats
         except Exception as e:
             logger.error(f"❌ Ошибка получения статистики: {e}")
             return None
@@ -450,10 +310,6 @@ class Database:
             cursor.execute("SELECT COUNT(*) FROM waybills")
             waybills_count = cursor.fetchone()[0]
             
-            # Информация о последних действиях
-            cursor.execute("SELECT MAX(created_at) as last_activity FROM waybills")
-            last_activity = cursor.fetchone()[0]
-            
             conn.close()
             
             return {
@@ -461,28 +317,20 @@ class Database:
                 'exists': exists,
                 'size': size,
                 'vehicles_count': vehicles_count,
-                'waybills_count': waybills_count,
-                'last_activity': last_activity
+                'waybills_count': waybills_count
             }
         except Exception as e:
             logger.error(f"❌ Ошибка получения информации о БД: {e}")
             return {}
 
 # ════════════════════════════════════════════════════════════════════════════
-# 📝 СОСТОЯНИЯ FSM (ОПТИМИЗИРОВАННЫЕ)
+# 📝 СОСТОЯНИЯ FSM
 # ════════════════════════════════════════════════════════════════════════════
 
 class AddVehicleStates(StatesGroup):
     number = State()
     fuel_rate = State()
-    idle_rate = State()
-
-class SearchVehicleStates(StatesGroup):
-    search_term = State()
-
-class DeleteVehicleStates(StatesGroup):
-    select_vehicle = State()
-    confirm_delete = State()
+    idle_rate = State()  # НОВОЕ: состояние для ввода простоя
 
 class WaybillStates(StatesGroup):
     vehicle_selected = State()
@@ -492,50 +340,30 @@ class WaybillStates(StatesGroup):
     fuel_start = State()
     end_time = State()
     odo_end = State()
-    overuse_choice = State()
-    overuse_hours = State()
-    overuse_manual = State()
+    overuse_choice = State()  # НОВОЕ: выбор способа учета перерасхода
+    overuse_hours = State()   # НОВОЕ: ввод часов простоя
+    overuse_manual = State()  # НОВОЕ: ручной ввод перерасхода
     economy = State()
-    fuel_end_choice = State()
-    fuel_refuel = State()
-    fuel_end_manual = State()
+    fuel_end_choice = State()   # НОВОЕ: выбор способа ввода остатка топлива
+    fuel_refuel = State()       # НОВОЕ: заправленное топливо
+    fuel_end_manual = State()   # НОВОЕ: ручной ввод остатка топлива
 
 # ════════════════════════════════════════════════════════════════════════════
-# ⌨️ КЛАВИАТУРЫ (ОПТИМИЗИРОВАННЫЕ)
+# ⌨️  КЛАВИАТУРЫ
 # ════════════════════════════════════════════════════════════════════════════
 
 def get_main_keyboard() -> ReplyKeyboardMarkup:
-    """Главное меню"""
+    """Основная клавиатура"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📝 Новый путевой лист")],
-            [KeyboardButton(text="🚗 Автомобили")],
+            [KeyboardButton(text="🚗 Добавить автомобиль")],
+            [KeyboardButton(text="📊 Мои автомобили")],
             [KeyboardButton(text="📈 Статистика")],
             [KeyboardButton(text="ℹ️ Инфо о боте")]
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите действие..."
-    )
-
-def get_vehicles_keyboard() -> ReplyKeyboardMarkup:
-    """Меню автомобилей"""
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📋 Список автомобилей")],
-            [KeyboardButton(text="🔍 Поиск автомобиля")],
-            [KeyboardButton(text="🚗 Добавить автомобиль")],
-            [KeyboardButton(text="🗑️ Удалить автомобиль")],
-            [KeyboardButton(text="⬅️ Назад")]
-        ],
-        resize_keyboard=True,
-        input_field_placeholder="Выберите действие..."
-    )
-
-def get_back_keyboard() -> ReplyKeyboardMarkup:
-    """Клавиатура с кнопкой Назад"""
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="⬅️ Назад")]],
-        resize_keyboard=True
     )
 
 def get_skip_keyboard() -> ReplyKeyboardMarkup:
@@ -548,11 +376,176 @@ def get_skip_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
-def get_vehicles_list_keyboard(vehicles: List[Dict], with_cancel: bool = True) -> ReplyKeyboardMarkup:
-    """Клавиатура списка автомобилей"""
+def get_vehicles_keyboard(vehicles: list) -> ReplyKeyboardMarkup:
+    """Клавиатура выбора автомобиля"""
     buttons = []
     for vehicle in vehicles:
-        buttons.append([KeyboardButton(text=f"🚙 {vehicle['number']}")])
-    
-    if with_can:
+        buttons.append([KeyboardButton(text=f"🚙 {vehicle['number']} ({vehicle['fuel_rate']} л/км, {vehicle['idle_rate']} л/ч)")])
+    buttons.append([KeyboardButton(text="❌ Отмена")])
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
+def get_initial_data_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура для выбора начальных данных"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="✅ Использовать данные предыдущего дня")],
+            [KeyboardButton(text="✏️ Ввести вручную")]
+        ],
+        resize_keyboard=True
+    )
+
+def get_overuse_choice_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура для выбора способа учета перерасхода"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🕒 Рассчитать по простому")],
+            [KeyboardButton(text="✏️ Ввести перерасход вручную")],
+            [KeyboardButton(text="✅ Нет перерасхода")]
+        ],
+        resize_keyboard=True
+    )
+
+def get_fuel_end_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура для выбора способа ввода остатка топлива"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📊 Рассчитать автоматически")],
+            [KeyboardButton(text="✏️ Ввести остаток вручную")],
+            [KeyboardButton(text="⛽ Добавить заправку")]
+        ],
+        resize_keyboard=True
+    )
+
+# ════════════════════════════════════════════════════════════════════════════
+# 🛠️  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ════════════════════════════════════════════════════════════════════════════
+
+def calculate_hours(start_time: str, end_time: str) -> float:
+    """Расчет количества часов между двумя временами"""
+    try:
+        fmt = "%H:%M"
+        start = datetime.strptime(start_time, fmt)
+        end = datetime.strptime(end_time, fmt)
+        
+        if end < start:
+            end += timedelta(days=1)
+        
+        hours = (end - start).total_seconds() / 3600
+        return round(hours, 2)
+    except Exception as e:
+        logger.error(f"❌ Ошибка расчета часов: {e}")
+        return 0.0
+
+def validate_time(time_str: str) -> bool:
+    """Валидация формата времени"""
+    try:
+        datetime.strptime(time_str, "%H:%M")
+        return True
+    except ValueError:
+        return False
+
+def validate_number(value: str) -> bool:
+    """Валидация числового значения"""
+    try:
+        float(value)
+        return True
+    except ValueError:
+        return False
+
+# ════════════════════════════════════════════════════════════════════════════
+# 🏠 ОБРАБОТЧИКИ КОМАНД
+# ════════════════════════════════════════════════════════════════════════════
+
+@router.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext):
+    """Обработчик команды /start"""
+    await state.clear()
+    logger.info(f"🚀 Пользователь {message.from_user.id} запустил бота")
+    
+    await message.answer(
+        "<b>🚛 Система учета путевых листов v3.0</b>\n\n"
+        "Бот помогает вести учет путевых листов, "
+        "контролировать расход топлива и пробег.\n\n"
+        "<b>НОВОЕ в версии 3.0:</b>\n"
+        "• Поддержка Volume для Railway\n"
+        "• Сохранение данных между деплоями\n"
+        "• Учет простоя автомобиля\n"
+        "• Расчет перерасхода по часам простоя\n"
+        "• Ручной ввод остатка топлива\n"
+        "• Учет заправленного топлива\n\n"
+        "Выберите действие:",
+        reply_markup=get_main_keyboard()
+    )
+
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    """Обработчик команды /help"""
+    help_text = """
+<b>📋 Доступные команды:</b>
+
+/start - Главное меню
+/help - Эта справка
+/cancel - Отмена текущего действия
+/stats - Статистика бота
+/info - Информация о боте и базе данных
+
+<b>📝 Как работать с ботом:</b>
+
+1. <b>Добавьте автомобиль</b> - укажите:
+   • Гос. номер
+   • Норму расхода (л/км)
+   • Перерасход при простое (л/ч)
+
+2. <b>Создайте путевой лист</b> - заполните данные за день
+
+3. <b>Расчет перерасхода:</b>
+   • Введите часы простоя
+   • Бот рассчитает: часы × перерасход в час
+   • Пример: 5 ч × 0.9 л/ч = 4.5 л перерасхода
+
+4. <b>Новые возможности:</b>
+   • Расчет перерасхода по часам простоя
+   • Ввод перерасхода вручную
+   • Ввод остатка топлива вручную
+   • Учет заправленного топлива
+
+5. <b>Смотрите статистику</b> за последние 7 дней
+
+<b>⚠️ Внимание:</b>
+• Время указывайте в формате ЧЧ:ММ
+• Показания одометра - в километрах
+• Топливо - в литрах
+• Простой - в часах
+"""
+    await message.answer(help_text)
+
+@router.message(Command("cancel"))
+@router.message(F.text == "❌ Отмена")
+async def cmd_cancel(message: Message, state: FSMContext):
+    """Отмена текущего действия"""
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("🤷 Нет активных действий для отмены", reply_markup=get_main_keyboard())
+        return
+    
+    await state.clear()
+    logger.info(f"❌ Пользователь {message.from_user.id} отменил действие")
+    await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
+
+@router.message(Command("stats"))
+@router.message(F.text == "📈 Статистика")
+async def cmd_stats(message: Message):
+    """Статистика бота"""
+    try:
+        db_info = Database.get_database_info()
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM vehicles")
+        vehicles_count = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM waybills")
+        waybills_count = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT SUM(distance) FROM waybill
