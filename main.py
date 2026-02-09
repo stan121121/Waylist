@@ -53,7 +53,7 @@ router = Router()
 dp.include_router(router)
 
 # ════════════════════════════════════════════════════════════════════════════
-# 💾 БАЗА ДАННЫХ С VOLUME ПОДДЕРЖКОЙ
+# 💾 БАЗА ДАННЫХ С VOLUME ПОДДЕРЖКОЯ
 # ════════════════════════════════════════════════════════════════════════════
 
 def get_db_path() -> str:
@@ -626,29 +626,117 @@ def get_confirm_keyboard() -> ReplyKeyboardMarkup:
 # 🛠️ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ════════════════════════════════════════════════════════════════════════════
 
-def calculate_hours(start_time: str, end_time: str) -> float:
-    """Расчет количества часов между двумя временами"""
+def calculate_hours_minutes(start_time: str, end_time: str) -> tuple[int, int]:
+    """Расчет количества часов и минут между двумя временами"""
     try:
+        # Приводим время к формату HH:MM (убираем секунды если есть)
+        def normalize_time(time_str: str) -> str:
+            parts = time_str.split(':')
+            if len(parts) >= 2:
+                return f"{int(parts[0]):02d}:{int(parts[1]):02d}"
+            return time_str
+        
+        start_time_norm = normalize_time(start_time)
+        end_time_norm = normalize_time(end_time)
+        
         fmt = "%H:%M"
-        start = datetime.strptime(start_time, fmt)
-        end = datetime.strptime(end_time, fmt)
+        start = datetime.strptime(start_time_norm, fmt)
+        end = datetime.strptime(end_time_norm, fmt)
         
         if end < start:
             end += timedelta(days=1)
         
-        hours = (end - start).total_seconds() / 3600
-        return round(hours, 2)
+        delta = end - start
+        total_seconds = delta.total_seconds()
+        
+        hours = int(total_seconds // 3600)
+        minutes = int((total_seconds % 3600) // 60)
+        
+        return hours, minutes
     except Exception as e:
-        logger.error(f"❌ Ошибка расчета часов: {e}")
+        logger.error(f"❌ Ошибка расчета часов и минут: {e}")
+        return 0, 0
+
+def calculate_hours_decimal(start_time: str, end_time: str) -> float:
+    """Расчет часов в десятичном формате для хранения в БД"""
+    try:
+        hours, minutes = calculate_hours_minutes(start_time, end_time)
+        return hours + minutes / 60.0
+    except Exception as e:
+        logger.error(f"❌ Ошибка расчета часов в десятичном формате: {e}")
         return 0.0
 
 def validate_time(time_str: str) -> bool:
-    """Валидация формата времени"""
+    """Валидация формата времени (поддержка различных форматов)"""
     try:
-        datetime.strptime(time_str, "%H:%M")
-        return True
-    except ValueError:
+        # Убираем пробелы
+        time_str = time_str.strip()
+        
+        # Пробуем разные форматы
+        time_formats = [
+            "%H:%M",    # 06:30, 20:00
+            "%H:%M:%S", # 06:30:00, 20:00:00
+            "%H.%M",    # 06.30, 20.00
+            "%H.%M.%S", # 06.30.00, 20.00.00
+        ]
+        
+        for time_format in time_formats:
+            try:
+                datetime.strptime(time_str, time_format)
+                return True
+            except ValueError:
+                continue
+        
+        # Пробуем парсинг без ведущего нуля
+        if ':' in time_str:
+            parts = time_str.split(':')
+            if len(parts) >= 2:
+                try:
+                    hours = int(parts[0])
+                    minutes = int(parts[1])
+                    if 0 <= hours <= 23 and 0 <= minutes <= 59:
+                        return True
+                except ValueError:
+                    pass
+        
         return False
+    except Exception:
+        return False
+
+def normalize_time(time_str: str) -> str:
+    """Нормализация времени в формат HH:MM"""
+    try:
+        # Убираем пробелы
+        time_str = time_str.strip()
+        
+        # Заменяем точки на двоеточия
+        time_str = time_str.replace('.', ':')
+        
+        # Разбиваем на части
+        parts = time_str.split(':')
+        
+        if len(parts) >= 2:
+            hours = int(parts[0])
+            minutes = int(parts[1])
+            
+            # Проверяем корректность
+            if 0 <= hours <= 23 and 0 <= minutes <= 59:
+                return f"{hours:02d}:{minutes:02d}"
+        
+        return time_str
+    except Exception:
+        return time_str
+
+def format_time_duration(hours: int, minutes: int) -> str:
+    """Форматирование длительности времени"""
+    if hours == 0 and minutes == 0:
+        return "0 мин"
+    elif hours == 0:
+        return f"{minutes} мин"
+    elif minutes == 0:
+        return f"{hours} ч"
+    else:
+        return f"{hours} ч {minutes} мин"
 
 def validate_number(value: str) -> bool:
     """Валидация числового значения"""
@@ -669,6 +757,18 @@ async def save_and_show_waybill(message: Message, state: FSMContext):
     waybill_id = Database.save_waybill(data)
     
     if waybill_id:
+        # Форматируем время работы
+        start_time = data.get('start_time', '--:--')
+        end_time = data.get('end_time', '--:--')
+        hours_decimal = data.get('hours', 0)
+        hours = int(hours_decimal)
+        minutes = int(round((hours_decimal - hours) * 60))
+        
+        # Корректируем минуты если нужно
+        if minutes >= 60:
+            hours += 1
+            minutes -= 60
+        
         # Формируем сводку
         distance = data.get('distance', 0)
         fuel_actual = data.get('fuel_actual', 0)
@@ -681,8 +781,8 @@ async def save_and_show_waybill(message: Message, state: FSMContext):
 📅 <b>Дата:</b> {data.get('date')}
 
 <b>📊 РАСЧЕТЫ:</b>
-🕒 <b>Время работы:</b> {data.get('start_time', '--:--')} - {data.get('end_time', '--:--')}
-⏱ <b>Всего часов:</b> {data.get('hours', 0):.2f} ч
+🕒 <b>Время работы:</b> {start_time} - {end_time}
+⏱ <b>Всего времени:</b> {format_time_duration(hours, minutes)}
 🛣 <b>Расстояние:</b> {distance:.0f} км
 ⛽ <b>Норма расхода:</b> {data.get('fuel_norm', 0):.2f} л
 📈 <b>Перерасход:</b> {data.get('overuse', 0):.2f} л
@@ -1198,7 +1298,8 @@ async def waybill_vehicle_selected(message: Message, state: FSMContext):
     else:
         await message.answer(
             f"🚗 <b>Автомобиль:</b> {vehicle_info['number']}\n\n"
-            f"🕒 Введите время выпуска на линию (ЧЧ:ММ):",
+            f"🕒 Введите время выпуска на линию (ЧЧ:ММ):\n"
+            f"<i>Можно вводить время в форматах: 06:30, 6:30, 06.30, 06:30:00</i>",
             reply_markup=ReplyKeyboardRemove()
         )
         await state.set_state(WaybillStates.start_time)
@@ -1215,15 +1316,21 @@ async def waybill_start_time(message: Message, state: FSMContext):
     
     if not validate_time(message.text):
         await message.answer(
-            "❌ Неверный формат времени. Введите время в формате ЧЧ:ММ (например, 08:30) или нажмите ❌ Отмена",
-            reply_markup=get_cancel_keyboard()
+            "❌ Неверный формат времени. Введите время в формате <b>ЧЧ:ММ</b>\n"
+            "<i>Примеры: 06:30, 6:30, 06.30, 06:30:00, 6.30</i>\n\n"
+            "Нажмите ❌ Отмена для отмены",
+            reply_markup=get_cancel_keyboard(),
+            parse_mode="HTML"
         )
         return
     
-    await state.update_data(start_time=message.text)
+    # Нормализуем время
+    start_time = normalize_time(message.text)
+    
+    await state.update_data(start_time=start_time)
     
     await message.answer(
-        f"🕒 <b>Время выпуска:</b> {message.text}\n\n"
+        f"🕒 <b>Время выпуска:</b> {start_time}\n\n"
         f"📊 Введите показания одометра на начало дня (км):",
         reply_markup=get_cancel_keyboard()
     )
@@ -1287,7 +1394,8 @@ async def waybill_fuel_start(message: Message, state: FSMContext):
         f"🕒 <b>Время выпуска:</b> {data.get('start_time', 'не указано')}\n"
         f"🛣 <b>Одометр на начало:</b> {data.get('odo_start', 0):.0f} км\n"
         f"⛽ <b>Топливо на начало:</b> {fuel_start:.2f} л\n\n"
-        f"🕒 Введите время возвращения на базу (ЧЧ:ММ):",
+        f"🕒 Введите время возвращения на базу (ЧЧ:ММ):\n"
+        f"<i>Можно вводить время в форматах: 20:00, 8:00, 20.00, 20:00:00</i>",
         reply_markup=get_cancel_keyboard()
     )
     await state.set_state(WaybillStates.end_time)
@@ -1302,10 +1410,16 @@ async def waybill_end_time(message: Message, state: FSMContext):
     
     if not validate_time(message.text):
         await message.answer(
-            "❌ Неверный формат времени. Введите время в формате ЧЧ:ММ (например, 17:45) или нажмите ❌ Отмена",
-            reply_markup=get_cancel_keyboard()
+            "❌ Неверный формат времени. Введите время в формате <b>ЧЧ:ММ</b>\n"
+            "<i>Примеры: 20:00, 8:00, 20.00, 20:00:00, 8.00</i>\n\n"
+            "Нажмите ❌ Отмена для отмены",
+            reply_markup=get_cancel_keyboard(),
+            parse_mode="HTML"
         )
         return
+    
+    # Нормализуем время
+    end_time = normalize_time(message.text)
     
     data = await state.get_data()
     start_time = data.get('start_time')
@@ -1315,14 +1429,15 @@ async def waybill_end_time(message: Message, state: FSMContext):
         await state.clear()
         return
     
-    end_time = message.text
-    hours = calculate_hours(start_time, end_time)
+    # Расчет времени работы
+    hours, minutes = calculate_hours_minutes(start_time, end_time)
+    hours_decimal = calculate_hours_decimal(start_time, end_time)
     
-    await state.update_data(end_time=end_time, hours=hours)
+    await state.update_data(end_time=end_time, hours=hours_decimal)
     
     await message.answer(
         f"🕒 <b>Время возвращения:</b> {end_time}\n"
-        f"⏱ <b>Всего часов:</b> {hours:.2f} ч\n\n"
+        f"⏱ <b>Всего времени:</b> {format_time_duration(hours, minutes)}\n\n"
         f"📊 Введите показания одометра на конец дня (км):",
         reply_markup=get_cancel_keyboard()
     )
@@ -1399,7 +1514,8 @@ async def waybill_initial_data_choice(message: Message, state: FSMContext):
             f"✅ Используем данные предыдущего дня:\n"
             f"🛣 <b>Одометр:</b> {previous_odo:.0f} км\n"
             f"⛽ <b>Топливо:</b> {previous_fuel:.2f} л\n\n"
-            f"🕒 Введите время выпуска на линию (ЧЧ:ММ):",
+            f"🕒 Введите время выпуска на линию (ЧЧ:ММ):\n"
+            f"<i>Можно вводить время в форматах: 06:30, 6:30, 06.30</i>",
             reply_markup=get_cancel_keyboard()
         )
         await state.set_state(WaybillStates.start_time)
