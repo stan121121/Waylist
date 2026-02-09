@@ -1358,12 +1358,28 @@ async def waybill_start_time(message: Message, state: FSMContext):
     
     await state.update_data(start_time=start_time)
     
-    await message.answer(
-        f"🕒 <b>Время выпуска:</b> {start_time}\n\n"
-        f"📊 Введите показания одометра на начало дня (км):",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(WaybillStates.odo_start)
+    data = await state.get_data()
+    
+    # Проверяем, установлены ли уже odo_start и fuel_start (использовали данные предыдущего дня)
+    if data.get('odo_start') is not None and data.get('fuel_start') is not None:
+        # Данные уже есть, переходим сразу к запросу времени возвращения
+        await message.answer(
+            f"🕒 <b>Время выпуска:</b> {start_time}\n"
+            f"🛣 <b>Одометр на начало:</b> {data.get('odo_start', 0):.0f} км\n"
+            f"⛽ <b>Топливо на начало:</b> {format_volume(data.get('fuel_start', 0))} л\n\n"
+            f"🕒 Введите время возвращения на базу (ЧЧ:ММ):\n"
+            f"<i>Можно вводить время в форматах: 20:00, 8:00, 20.00, 20:00:00</i>",
+            reply_markup=get_cancel_keyboard()
+        )
+        await state.set_state(WaybillStates.end_time)
+    else:
+        # Данных нет, запрашиваем одометр
+        await message.answer(
+            f"🕒 <b>Время выпуска:</b> {start_time}\n\n"
+            f"📊 Введите показания одометра на начало дня (км):",
+            reply_markup=get_cancel_keyboard()
+        )
+        await state.set_state(WaybillStates.odo_start)
 
 @router.message(WaybillStates.odo_start)
 async def waybill_odo_start(message: Message, state: FSMContext):
@@ -1718,15 +1734,29 @@ async def waybill_economy(message: Message, state: FSMContext):
     await state.update_data(economy=economy)
     
     data = await state.get_data()
-    await message.answer(
-        f"🚗 <b>Автомобиль:</b> {data.get('vehicle_number')}\n\n"
-        "⛽ <b>Как ввести остаток топлива на конец дня?</b>\n"
-        "• 📊 Рассчитать автоматически - из начального топлива вычесть расход\n"
-        "• ✏️ Ввести остаток вручную\n"
-        "• ⛽ Добавить заправку",
-        reply_markup=get_fuel_end_keyboard()
+    
+    # РАСЧЕТ ОСТАТКА ТОПЛИВА НА КОНЕЦ ДНЯ АВТОМАТИЧЕСКИ
+    fuel_start = data.get('fuel_start', 0)
+    fuel_norm = data.get('fuel_norm', 0)
+    overuse = data.get('overuse', 0)
+    economy = data.get('economy', 0)
+    
+    # Расчет фактического расхода
+    fuel_actual = fuel_norm + overuse - economy
+    
+    # Расчет остатка автоматически
+    fuel_end = fuel_start - fuel_actual
+    
+    # Обновляем данные
+    await state.update_data(
+        fuel_actual=fuel_actual,
+        fuel_end=fuel_end,
+        fuel_refuel=0,  # заправки пока нет
+        fuel_end_manual=0
     )
-    await state.set_state(WaybillStates.fuel_end_choice)
+    
+    # Переходим к сохранению и показу результата
+    await save_and_show_waybill(message, state)
 
 @router.message(WaybillStates.fuel_end_choice)
 async def waybill_fuel_end_choice(message: Message, state: FSMContext):
@@ -1760,6 +1790,7 @@ async def waybill_fuel_end_choice(message: Message, state: FSMContext):
         await state.update_data(
             fuel_actual=fuel_actual,
             fuel_end=fuel_end,
+            fuel_refuel=0,
             fuel_end_manual=0
         )
         
@@ -1806,8 +1837,10 @@ async def waybill_fuel_refuel(message: Message, state: FSMContext):
         await message.answer("❌ Количество топлива не может быть отрицательным")
         return
     
+    # Сохраняем количество заправленного топлива
     await state.update_data(fuel_refuel=fuel_refuel)
     
+    # Запрашиваем остаток топлива на конец дня
     await message.answer(
         "⛽ Введите остаток топлива на конец дня (л):\n"
         f"<i>Формат: 3 знака после запятой (например: 15.500)</i>",
@@ -1838,9 +1871,6 @@ async def waybill_fuel_end_manual(message: Message, state: FSMContext):
     data = await state.get_data()
     fuel_start = data.get('fuel_start', 0)
     fuel_refuel = data.get('fuel_refuel', 0)
-    fuel_norm = data.get('fuel_norm', 0)
-    overuse = data.get('overuse', 0)
-    economy = data.get('economy', 0)
     
     # Расчет фактического расхода с учетом заправки
     fuel_actual = fuel_start + fuel_refuel - fuel_end
