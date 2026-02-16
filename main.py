@@ -758,7 +758,12 @@ def validate_number(value: str) -> bool:
 
 def format_volume(value: float) -> str:
     """Форматирование объема топлива с 3 знаками после запятой"""
-    return f"{value:.3f}".rstrip('0').rstrip('.')
+    # Округляем до 3 знаков для устранения погрешностей float
+    rounded = round(value, 3)
+    # Убираем лишние нули в конце, но оставляем как минимум один знак, если нужно
+    s = f"{rounded:.3f}".rstrip('0').rstrip('.')
+    # Если после удаления ничего не осталось (например, было 0.000), возвращаем "0"
+    return s if s else "0"
 
 async def save_and_show_waybill(message: Message, state: FSMContext):
     """Сохранение и отображение путевого листа"""
