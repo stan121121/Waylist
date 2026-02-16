@@ -1527,6 +1527,9 @@ async def waybill_odo_end(message: Message, state: FSMContext):
     )
     await state.set_state(WaybillStates.overuse_choice)
 
+# ════════════════════════════════════════════════════════════════════════════
+# ИСПРАВЛЕННЫЙ ОБРАБОТЧИК ВЫБОРА НАЧАЛЬНЫХ ДАННЫХ
+# ════════════════════════════════════════════════════════════════════════════
 @router.message(WaybillStates.initial_data_choice)
 async def waybill_initial_data_choice(message: Message, state: FSMContext):
     """Обработка выбора начальных данных"""
@@ -1535,8 +1538,9 @@ async def waybill_initial_data_choice(message: Message, state: FSMContext):
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
         return
     
+    data = await state.get_data()
+    
     if message.text == "✅ Использовать данные предыдущего дня":
-        data = await state.get_data()
         previous_odo = data.get('previous_odo', 0)
         previous_fuel = data.get('previous_fuel', 0)
         
@@ -1555,11 +1559,13 @@ async def waybill_initial_data_choice(message: Message, state: FSMContext):
         await state.set_state(WaybillStates.start_time)
         
     elif message.text == "✏️ Ввести вручную":
+        # Переходим к вводу времени, как при отсутствии предыдущих данных
         await message.answer(
-            "📊 Введите показания одометра на начало дня (км):",
+            f"🚗 <b>Автомобиль:</b> {data.get('vehicle_number')}\n\n"
+            f"🕒 Введите время выпуска на линию (ЧЧ:ММ):",
             reply_markup=get_cancel_keyboard()
         )
-        await state.set_state(WaybillStates.odo_start)
+        await state.set_state(WaybillStates.start_time)
     else:
         await message.answer(
             "❌ Пожалуйста, выберите один из вариантов выше или нажмите ❌ Отмена",
