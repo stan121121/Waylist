@@ -17,6 +17,10 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
+# ════════════════════════════════════════════════════════════════════════════
+# ⚙️ НАСТРОЙКА ЛОГИРОВАНИЯ
+# ════════════════════════════════════════════════════════════════════════════
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -27,6 +31,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ════════════════════════════════════════════════════════════════════════════
+# 🔐 КОНФИГУРАЦИЯ
+# ════════════════════════════════════════════════════════════════════════════
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     logger.error("❌ BOT_TOKEN не найден!")
@@ -34,44 +42,65 @@ if not BOT_TOKEN:
 
 logger.info("✅ Бот инициализирован")
 
+# ════════════════════════════════════════════════════════════════════════════
+# 🤖 ИНИЦИАЛИЗАЦИЯ БОТА
+# ════════════════════════════════════════════════════════════════════════════
+
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
 dp.include_router(router)
 
+# ════════════════════════════════════════════════════════════════════════════
+# 💾 БАЗА ДАННЫХ С VOLUME ПОДДЕРЖКОЙ
+# ════════════════════════════════════════════════════════════════════════════
+
 def get_db_path() -> str:
+    """Определяет путь к базе данных с учетом Volume"""
     if os.path.exists('/data'):
         db_dir = '/data'
         logger.info("✅ Volume /data обнаружен")
     else:
         db_dir = '.'
         logger.info("📁 Используется локальная папка")
+    
     os.makedirs(db_dir, exist_ok=True)
     db_path = os.path.join(db_dir, 'waybills.db')
     logger.info(f"📊 Путь к БД: {db_path}")
     return db_path
 
 def get_db_connection():
+    """Создание подключения к SQLite"""
     db_path = get_db_path()
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # Включаем foreign keys и оптимизируем
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 def migrate_database():
+    """Миграция базы данных - добавление недостающих столбцов"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        
+        # Проверяем существующие столбцы в таблице vehicles
         cursor.execute("PRAGMA table_info(vehicles)")
         columns = [col[1] for col in cursor.fetchall()]
+        
+        # Добавляем updated_at если нет
         if 'updated_at' not in columns:
             logger.info("🔄 Добавляем столбец updated_at в таблицу vehicles")
             cursor.execute("ALTER TABLE vehicles ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        
+        # Проверяем существующие столбцы в таблице waybills
         cursor.execute("PRAGMA table_info(waybills)")
         columns = [col[1] for col in cursor.fetchall()]
+        
+        # Добавляем недостающие столбцы в waybills
         required_columns = ['overuse_hours', 'overuse_calculated', 'fuel_refuel', 'fuel_end_manual']
         for column in required_columns:
             if column not in columns:
@@ -82,6 +111,7 @@ def migrate_database():
                     cursor.execute(f"ALTER TABLE waybills ADD COLUMN {column} INTEGER DEFAULT 0")
                 elif column == 'fuel_refuel':
                     cursor.execute(f"ALTER TABLE waybills ADD COLUMN {column} REAL DEFAULT 0")
+        
         conn.commit()
         conn.close()
         logger.info("✅ Миграция базы данных выполнена")
@@ -89,11 +119,15 @@ def migrate_database():
         logger.error(f"❌ Ошибка миграции БД: {e}")
 
 def init_database():
+    """Инициализация базы данных"""
     try:
         db_path = get_db_path()
         logger.info(f"🔄 Инициализация базы данных по пути: {db_path}")
+        
         conn = get_db_connection()
         cursor = conn.cursor()
+        
+        # Таблица автомобилей (исправленная версия без updated_at в CREATE)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS vehicles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,6 +137,8 @@ def init_database():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        
+        # Таблица путевых листов
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS waybills (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -130,6 +166,8 @@ def init_database():
                 FOREIGN KEY (vehicle_id) REFERENCES vehicles (id) ON DELETE CASCADE
             )
         ''')
+        
+        # Оптимизированные индексы
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_vehicles_number 
             ON vehicles(number)
@@ -138,16 +176,25 @@ def init_database():
             CREATE INDEX IF NOT EXISTS idx_waybills_vehicle_user_date 
             ON waybills(vehicle_id, user_id, date DESC)
         ''')
+        
         conn.commit()
         conn.close()
         logger.info("✅ База данных инициализирована")
+        
+        # Выполняем миграцию для существующих баз
         migrate_database()
+        
     except Exception as e:
         logger.error(f"❌ Ошибка инициализации БД: {e}")
+
+# ════════════════════════════════════════════════════════════════════════════
+# 📊 КЛАСС ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ (ОПТИМИЗИРОВАННЫЙ)
+# ════════════════════════════════════════════════════════════════════════════
 
 class Database:
     @staticmethod
     def add_vehicle(number: str, fuel_rate: float, idle_rate: float = 2.0) -> Optional[int]:
+        """Добавление нового автомобиля"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -158,6 +205,7 @@ class Database:
             conn.commit()
             vehicle_id = cursor.lastrowid
             conn.close()
+            
             logger.info(f"✅ Добавлен автомобиль {number}")
             return vehicle_id
         except sqlite3.IntegrityError:
@@ -166,9 +214,10 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Ошибка добавления автомобиля: {e}")
             return None
-
+    
     @staticmethod
     def get_vehicles(force_refresh: bool = False) -> List[Dict]:
+        """Получение списка автомобилей"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -178,6 +227,7 @@ class Database:
                 FROM vehicles 
                 ORDER BY number COLLATE NOCASE
             """)
+            
             vehicles = []
             for row in cursor.fetchall():
                 vehicles.append({
@@ -187,25 +237,30 @@ class Database:
                     'idle_rate': row['idle_rate'],
                     'created_at': row['created_at']
                 })
+            
             conn.close()
             return vehicles
         except Exception as e:
             logger.error(f"❌ Ошибка получения списка автомобилей: {e}")
             return []
-
+    
     @staticmethod
     def get_vehicle(vehicle_id: int) -> Optional[Dict]:
+        """Получение информации об автомобиле по ID (ИСПРАВЛЕННЫЙ ЗАПРОС)"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
+            # Убираем запрос updated_at, которого может не быть в старых базах
             cursor.execute("""
                 SELECT id, number, fuel_rate, idle_rate,
                        strftime('%Y-%m-%d %H:%M', created_at) as created_at
                 FROM vehicles 
                 WHERE id = ?
             """, (vehicle_id,))
+            
             row = cursor.fetchone()
             conn.close()
+            
             if row:
                 return {
                     'id': row['id'],
@@ -218,9 +273,10 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Ошибка получения автомобиля: {e}")
             return None
-
+    
     @staticmethod
     def get_vehicle_by_number(number: str) -> Optional[Dict]:
+        """Получение автомобиля по номеру"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -229,8 +285,10 @@ class Database:
                 FROM vehicles 
                 WHERE number = ?
             """, (number.upper(),))
+            
             row = cursor.fetchone()
             conn.close()
+            
             if row:
                 return {
                     'id': row['id'],
@@ -242,9 +300,10 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Ошибка получения автомобиля по номеру: {e}")
             return None
-
+    
     @staticmethod
     def search_vehicles(search_term: str) -> List[Dict]:
+        """Поиск автомобилей по номеру"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -254,36 +313,46 @@ class Database:
                 WHERE number LIKE ? 
                 ORDER BY number COLLATE NOCASE
             """, (f'%{search_term.upper()}%',))
+            
             vehicles = []
             for row in cursor.fetchall():
                 vehicles.append(dict(row))
+            
             conn.close()
             return vehicles
         except Exception as e:
             logger.error(f"❌ Ошибка поиска автомобилей: {e}")
             return []
-
+    
     @staticmethod
     def delete_vehicle(vehicle_id: int) -> bool:
+        """Удаление автомобиля"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
+            
+            # Получаем информацию перед удалением
             cursor.execute("SELECT number FROM vehicles WHERE id = ?", (vehicle_id,))
             vehicle = cursor.fetchone()
+            
             if not vehicle:
                 conn.close()
                 return False
+            
+            # Удаляем автомобиль (путевые листы удалятся каскадно)
             cursor.execute("DELETE FROM vehicles WHERE id = ?", (vehicle_id,))
             conn.commit()
             conn.close()
+            
             logger.info(f"🗑️ Удален автомобиль {vehicle['number']}")
             return True
         except Exception as e:
             logger.error(f"❌ Ошибка удаления автомобиля: {e}")
             return False
-
+    
     @staticmethod
     def get_last_waybill(vehicle_id: int, user_id: int) -> Optional[Dict]:
+        """Получение последнего путевого листа"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -294,20 +363,24 @@ class Database:
                 ORDER BY date DESC, id DESC 
                 LIMIT 1
             ''', (vehicle_id, user_id))
+            
             row = cursor.fetchone()
             conn.close()
+            
             if row:
                 return dict(row)
             return None
         except Exception as e:
             logger.error(f"❌ Ошибка получения последнего путевого листа: {e}")
             return None
-
+    
     @staticmethod
     def save_waybill(data: Dict[str, Any]) -> Optional[int]:
+        """Сохранение путевого листа"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
+            
             cursor.execute('''
                 INSERT INTO waybills 
                 (vehicle_id, user_id, date, start_time, end_time, total_hours, 
@@ -337,17 +410,20 @@ class Database:
                 data.get('fuel_rate'),
                 data.get('fuel_end_manual', 0)
             ))
+            
             conn.commit()
             waybill_id = cursor.lastrowid
             conn.close()
+            
             logger.info(f"✅ Сохранен путевой лист #{waybill_id}")
             return waybill_id
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения путевого листа: {e}")
             return None
-
+    
     @staticmethod
     def get_statistics(vehicle_id: int, user_id: int, days: int = 7) -> Optional[Dict]:
+        """Получение статистики"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -367,28 +443,36 @@ class Database:
                 WHERE vehicle_id = ? AND user_id = ? 
                 AND date >= date('now', '-' || ? || ' days')
             ''', (vehicle_id, user_id, days))
+            
             row = cursor.fetchone()
             conn.close()
+            
             if row:
                 return dict(row)
             return None
         except Exception as e:
             logger.error(f"❌ Ошибка получения статистики: {e}")
             return None
-
+    
     @staticmethod
     def get_database_info() -> Dict[str, Any]:
+        """Получение информации о базе данных"""
         try:
             db_path = get_db_path()
             exists = os.path.exists(db_path)
             size = os.path.getsize(db_path) if exists else 0
+            
             conn = get_db_connection()
             cursor = conn.cursor()
+            
             cursor.execute("SELECT COUNT(*) FROM vehicles")
             vehicles_count = cursor.fetchone()[0]
+            
             cursor.execute("SELECT COUNT(*) FROM waybills")
             waybills_count = cursor.fetchone()[0]
+            
             conn.close()
+            
             return {
                 'path': db_path,
                 'exists': exists,
@@ -400,6 +484,9 @@ class Database:
             logger.error(f"❌ Ошибка получения информации о БД: {e}")
             return {}
 
+# ════════════════════════════════════════════════════════════════════════════
+# 📝 СОСТОЯНИЯ FSM
+# ════════════════════════════════════════════════════════════════════════════
 
 class AddVehicleStates(StatesGroup):
     number = State()
@@ -429,8 +516,12 @@ class WaybillStates(StatesGroup):
     fuel_refuel = State()
     fuel_end_manual = State()
 
+# ════════════════════════════════════════════════════════════════════════════
+# ⌨️ КЛАВИАТУРЫ
+# ════════════════════════════════════════════════════════════════════════════
 
 def get_main_keyboard() -> ReplyKeyboardMarkup:
+    """Главное меню"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📝 Новый путевой лист")],
@@ -443,6 +534,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     )
 
 def get_vehicles_keyboard() -> ReplyKeyboardMarkup:
+    """Меню автомобилей"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📋 Список автомобилей")],
@@ -456,18 +548,21 @@ def get_vehicles_keyboard() -> ReplyKeyboardMarkup:
     )
 
 def get_back_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура с кнопкой Назад"""
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="⬅️ Назад")]],
         resize_keyboard=True
     )
 
 def get_cancel_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура с кнопкой Отмена"""
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="❌ Отмена")]],
         resize_keyboard=True
     )
 
 def get_skip_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура для пропуска"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="0")],
@@ -477,13 +572,16 @@ def get_skip_keyboard() -> ReplyKeyboardMarkup:
     )
 
 def get_vehicles_list_keyboard(vehicles: List[Dict]) -> ReplyKeyboardMarkup:
+    """Клавиатура списка автомобилей"""
     buttons = []
     for vehicle in vehicles:
         buttons.append([KeyboardButton(text=f"🚙 {vehicle['number']}")])
+    
     buttons.append([KeyboardButton(text="❌ Отмена")])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 def get_initial_data_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура для выбора начальных данных"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="✅ Использовать данные предыдущего дня")],
@@ -493,6 +591,7 @@ def get_initial_data_keyboard() -> ReplyKeyboardMarkup:
     )
 
 def get_overuse_choice_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура для выбора способа учета перерасхода"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🕒 Рассчитать по простому")],
@@ -503,6 +602,7 @@ def get_overuse_choice_keyboard() -> ReplyKeyboardMarkup:
     )
 
 def get_fuel_end_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура для выбора способа ввода остатка топлива"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📊 Рассчитать автоматически")],
@@ -513,6 +613,7 @@ def get_fuel_end_keyboard() -> ReplyKeyboardMarkup:
     )
 
 def get_confirm_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура для подтверждения"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="✅ Да, удалить")],
@@ -521,31 +622,43 @@ def get_confirm_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
+# ════════════════════════════════════════════════════════════════════════════
+# 🛠️ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ════════════════════════════════════════════════════════════════════════════
 
 def calculate_hours_minutes(start_time: str, end_time: str) -> tuple[int, int]:
+    """Расчет количества часов и минут между двумя временами"""
     try:
+        # Приводим время к формату HH:MM (убираем секунды если есть)
         def normalize_time(time_str: str) -> str:
             parts = time_str.split(':')
             if len(parts) >= 2:
                 return f"{int(parts[0]):02d}:{int(parts[1]):02d}"
             return time_str
+        
         start_time_norm = normalize_time(start_time)
         end_time_norm = normalize_time(end_time)
+        
         fmt = "%H:%M"
         start = datetime.strptime(start_time_norm, fmt)
         end = datetime.strptime(end_time_norm, fmt)
+        
         if end < start:
             end += timedelta(days=1)
+        
         delta = end - start
         total_seconds = delta.total_seconds()
+        
         hours = int(total_seconds // 3600)
         minutes = int((total_seconds % 3600) // 60)
+        
         return hours, minutes
     except Exception as e:
         logger.error(f"❌ Ошибка расчета часов и минут: {e}")
         return 0, 0
 
 def calculate_hours_decimal(start_time: str, end_time: str) -> float:
+    """Расчет часов в десятичном формате для хранения в БД"""
     try:
         hours, minutes = calculate_hours_minutes(start_time, end_time)
         return hours + minutes / 60.0
@@ -554,15 +667,27 @@ def calculate_hours_decimal(start_time: str, end_time: str) -> float:
         return 0.0
 
 def validate_time(time_str: str) -> bool:
+    """Валидация формата времени (поддержка различных форматов)"""
     try:
+        # Убираем пробелы
         time_str = time_str.strip()
-        time_formats = ["%H:%M", "%H:%M:%S", "%H.%M", "%H.%M.%S"]
+        
+        # Пробуем разные форматы
+        time_formats = [
+            "%H:%M",    # 06:30, 20:00
+            "%H:%M:%S", # 06:30:00, 20:00:00
+            "%H.%M",    # 06.30, 20.00
+            "%H.%M.%S", # 06.30.00, 20.00.00
+        ]
+        
         for time_format in time_formats:
             try:
                 datetime.strptime(time_str, time_format)
                 return True
             except ValueError:
                 continue
+        
+        # Пробуем парсинг без ведущего нуля
         if ':' in time_str:
             parts = time_str.split(':')
             if len(parts) >= 2:
@@ -573,25 +698,37 @@ def validate_time(time_str: str) -> bool:
                         return True
                 except ValueError:
                     pass
+        
         return False
     except Exception:
         return False
 
 def normalize_time(time_str: str) -> str:
+    """Нормализация времени в формат HH:MM"""
     try:
+        # Убираем пробелы
         time_str = time_str.strip()
+        
+        # Заменяем точки на двоеточия
         time_str = time_str.replace('.', ':')
+        
+        # Разбиваем на части
         parts = time_str.split(':')
+        
         if len(parts) >= 2:
             hours = int(parts[0])
             minutes = int(parts[1])
+            
+            # Проверяем корректность
             if 0 <= hours <= 23 and 0 <= minutes <= 59:
                 return f"{hours:02d}:{minutes:02d}"
+        
         return time_str
     except Exception:
         return time_str
 
 def format_time_duration(hours: int, minutes: int) -> str:
+    """Форматирование длительности времени"""
     if hours == 0 and minutes == 0:
         return "0 мин"
     elif hours == 0:
@@ -602,54 +739,45 @@ def format_time_duration(hours: int, minutes: int) -> str:
         return f"{hours} ч {minutes} мин"
 
 def validate_number(value: str) -> bool:
+    """Валидация числового значения"""
     try:
         float(value)
         return True
     except ValueError:
         return False
 
-# ═══════════════════════════════════════════════════════════════════
-# ИСПРАВЛЕНИЕ 1: round() перед форматированием — устраняет ошибку
-# плавающей точки (например, 20.942999... → 20.943)
-# ═══════════════════════════════════════════════════════════════════
 def format_volume(value: float) -> str:
     """Форматирование объема топлива с 3 знаками после запятой"""
-    return f"{round(value, 3):.3f}".rstrip('0').rstrip('.')
-
+    return f"{value:.3f}".rstrip('0').rstrip('.')
 
 async def save_and_show_waybill(message: Message, state: FSMContext):
     """Сохранение и отображение путевого листа"""
     data = await state.get_data()
+    
+    # Добавляем дату
     data['date'] = datetime.now().strftime('%Y-%m-%d')
+    
+    # Сохраняем путевой лист
     waybill_id = Database.save_waybill(data)
-
+    
     if waybill_id:
+        # Форматируем время работы
         start_time = data.get('start_time', '--:--')
         end_time = data.get('end_time', '--:--')
         hours_decimal = data.get('hours', 0)
         hours = int(hours_decimal)
         minutes = int(round((hours_decimal - hours) * 60))
+        
+        # Корректируем минуты если нужно
         if minutes >= 60:
             hours += 1
             minutes -= 60
-
+        
+        # Формируем сводку с форматированием объемов
         distance = data.get('distance', 0)
         fuel_actual = data.get('fuel_actual', 0)
-
-        # ═══════════════════════════════════════════════════════════════════
-        # ИСПРАВЛЕНИЕ 2: показываем удельный расход в двух форматах —
-        # л/100км (стандарт диспетчера) и л/км (норма по путевому листу)
-        # ═══════════════════════════════════════════════════════════════════
-        if distance > 0:
-            consumption_per_100km = round(fuel_actual / distance * 100, 3)
-            consumption_per_km = round(fuel_actual / distance, 5)
-            consumption_str = (
-                f"{consumption_per_100km:.3f} л/100км  "
-                f"({consumption_per_km:.5f} л/км)"
-            )
-        else:
-            consumption_str = "0.000 л/100км  (0.00000 л/км)"
-
+        fuel_consumption = fuel_actual / distance * 100 if distance > 0 else 0
+        
         summary = f"""
 <b>✅ ПУТЕВОЙ ЛИСТ СОХРАНЕН #{waybill_id}</b>
 
@@ -668,23 +796,30 @@ async def save_and_show_waybill(message: Message, state: FSMContext):
 ⛽ <b>Остаток:</b> {format_volume(data.get('fuel_end', 0))} л
 
 <b>📈 ПОКАЗАТЕЛИ:</b>
-🏭 <b>Удельный расход:</b> {consumption_str}
+🏭 <b>Удельный расход:</b> {fuel_consumption:.3f} л/100км
 💰 <b>Эффективность:</b> {"Экономия ✅" if data.get('economy', 0) > data.get('overuse', 0) else "Перерасход ❌"}
 """
+        
         await message.answer(summary, reply_markup=get_main_keyboard())
     else:
         await message.answer(
-            "❌ Ошибка сохранения путевого листа!\nПопробуйте снова.",
+            "❌ Ошибка сохранения путевого листа!\n"
+            "Попробуйте снова.",
             reply_markup=get_main_keyboard()
         )
-
+    
     await state.clear()
 
+# ════════════════════════════════════════════════════════════════════════════
+# 🏠 ОБРАБОТЧИКИ КОМАНД
+# ════════════════════════════════════════════════════════════════════════════
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
+    """Обработчик команды /start"""
     await state.clear()
     logger.info(f"🚀 Пользователь {message.from_user.id} запустил бота")
+    
     await message.answer(
         "<b>🚛 Система учета путевых листов</b>\n\n"
         "<b>📋 Основные функции:</b>\n"
@@ -702,6 +837,7 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
+    """Обработчик команды /help"""
     help_text = """
 <b>📋 ДОСТУПНЫЕ КОМАНДЫ:</b>
 
@@ -734,10 +870,12 @@ async def cmd_help(message: Message):
 @router.message(Command("cancel"))
 @router.message(F.text.in_(["❌ Отмена", "⬅️ Назад", "⬅️ Назад в меню"]))
 async def cmd_cancel(message: Message, state: FSMContext):
+    """Отмена текущего действия"""
     current_state = await state.get_state()
     if current_state:
         await state.clear()
         logger.info(f"❌ Пользователь {message.from_user.id} отменил действие")
+    
     if message.text == "⬅️ Назад в меню":
         await message.answer("Главное меню:", reply_markup=get_main_keyboard())
     elif message.text == "⬅️ Назад":
@@ -748,8 +886,10 @@ async def cmd_cancel(message: Message, state: FSMContext):
 @router.message(Command("stats"))
 @router.message(F.text == "📈 Статистика")
 async def cmd_stats(message: Message):
+    """Статистика бота"""
     try:
         db_info = Database.get_database_info()
+        
         stats_text = f"""
 <b>📊 СТАТИСТИКА СИСТЕМЫ</b>
 
@@ -761,6 +901,7 @@ async def cmd_stats(message: Message):
 📏 <b>Размер:</b> {db_info.get('size', 0) / 1024:.1f} КБ
 ✅ <b>Volume /data:</b> {"подключен ✅" if os.path.exists('/data') else "не подключен ❌"}
 """
+        
         await message.answer(stats_text)
     except Exception as e:
         logger.error(f"❌ Ошибка получения статистики: {e}")
@@ -769,14 +910,16 @@ async def cmd_stats(message: Message):
 @router.message(Command("info"))
 @router.message(F.text == "ℹ️ Инфо о боте")
 async def cmd_info(message: Message):
+    """Информация о боте"""
     try:
         bot_info = await bot.get_me()
+        
         info_text = f"""
 <b>🤖 ИНФОРМАЦИЯ О БОТЕ</b>
 
 📛 <b>Имя:</b> @{bot_info.username}
 🆔 <b>ID:</b> {bot_info.id}
-📅 <b>Версия:</b> 2.1
+📅 <b>Версия:</b> 2.0
 🚀 <b>Платформа:</b> Railway
 ⚡ <b>Статус:</b> Работает
 
@@ -786,39 +929,55 @@ async def cmd_info(message: Message):
 • Индексы: оптимизированы для скорости
 • Логирование: в файл и консоль
 """
+        
         await message.answer(info_text)
     except Exception as e:
         logger.error(f"❌ Ошибка получения информации: {e}")
         await message.answer("❌ Ошибка получения информации")
 
+# ════════════════════════════════════════════════════════════════════════════
+# 🚗 МЕНЮ АВТОМОБИЛЕЙ
+# ════════════════════════════════════════════════════════════════════════════
 
 @router.message(F.text == "🚗 Автомобили")
 async def vehicles_menu(message: Message):
+    """Меню управления автомобилями"""
     await message.answer(
-        "<b>🚗 УПРАВЛЕНИЕ АВТОМОБИЛЯМИ</b>\n\nВыберите действие:",
+        "<b>🚗 УПРАВЛЕНИЕ АВТОМОБИЛЯМИ</b>\n\n"
+        "Выберите действие:",
         reply_markup=get_vehicles_keyboard()
     )
 
+# 📋 Список автомобилей
 @router.message(F.text == "📋 Список автомобилей")
 async def list_vehicles(message: Message):
+    """Вывод списка автомобилей"""
     vehicles = Database.get_vehicles()
+    
     if not vehicles:
         await message.answer(
-            "❌ В базе нет автомобилей.\nДобавьте первый автомобиль!",
+            "❌ В базе нет автомобилей.\n"
+            "Добавьте первый автомобиль!",
             reply_markup=get_vehicles_keyboard()
         )
         return
+    
     text = "<b>🚗 СПИСОК АВТОМОБИЛЕЙ</b>\n" + "━" * 35 + "\n\n"
+    
     for i, vehicle in enumerate(vehicles, 1):
         text += f"<b>{i}. {vehicle['number']}</b>\n"
         text += f"   ⛽ Расход: {format_volume(vehicle['fuel_rate'])} л/км\n"
         text += f"   ⏱️ Простой: {format_volume(vehicle['idle_rate'])} л/ч\n"
         text += f"   📅 Добавлен: {vehicle['created_at']}\n\n"
+    
     text += f"📊 <b>Всего автомобилей:</b> {len(vehicles)}\n"
+    
     await message.answer(text, reply_markup=get_vehicles_keyboard())
 
+# 🔍 Поиск автомобиля
 @router.message(F.text == "🔍 Поиск автомобиля")
 async def search_vehicle_start(message: Message, state: FSMContext):
+    """Начало поиска автомобиля"""
     await message.answer(
         "🔍 Введите номер автомобиля или его часть для поиска:",
         reply_markup=get_cancel_keyboard()
@@ -827,15 +986,20 @@ async def search_vehicle_start(message: Message, state: FSMContext):
 
 @router.message(SearchVehicleStates.search_term)
 async def search_vehicle_process(message: Message, state: FSMContext):
+    """Обработка поиска автомобиля"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("Поиск отменен", reply_markup=get_vehicles_keyboard())
         return
+    
     search_term = message.text.strip()
+    
     if not search_term or len(search_term) < 2:
         await message.answer("❌ Введите хотя бы 2 символа для поиска")
         return
+    
     vehicles = Database.search_vehicles(search_term)
+    
     if not vehicles:
         await message.answer(
             f"🔍 По запросу '<b>{search_term}</b>' ничего не найдено.\n"
@@ -844,17 +1008,24 @@ async def search_vehicle_process(message: Message, state: FSMContext):
         )
         await state.clear()
         return
-    text = f"<b>🔍 РЕЗУЛЬТАТЫ ПОИСКА:</b> '{search_term}'\n" + "━" * 35 + "\n\n"
+    
+    text = f"<b>🔍 РЕЗУЛЬТАТЫ ПОИСКА:</b> '{search_term}'\n"
+    text += "━" * 35 + "\n\n"
+    
     for i, vehicle in enumerate(vehicles, 1):
         text += f"<b>{i}. {vehicle['number']}</b>\n"
         text += f"   ⛽ Расход: {format_volume(vehicle['fuel_rate'])} л/км\n"
         text += f"   ⏱️ Простой: {format_volume(vehicle['idle_rate'])} л/ч\n\n"
+    
     text += f"📊 <b>Найдено автомобилей:</b> {len(vehicles)}"
+    
     await message.answer(text, reply_markup=get_vehicles_keyboard())
     await state.clear()
 
+# 🚗 Добавить автомобиль
 @router.message(F.text == "🚗 Добавить автомобиль")
 async def add_vehicle_start(message: Message, state: FSMContext):
+    """Начало добавления автомобиля"""
     await message.answer(
         "🚗 Введите государственный номер автомобиля:",
         reply_markup=get_cancel_keyboard()
@@ -863,20 +1034,27 @@ async def add_vehicle_start(message: Message, state: FSMContext):
 
 @router.message(AddVehicleStates.number)
 async def add_vehicle_number(message: Message, state: FSMContext):
+    """Обработка номера автомобиля"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("Добавление отменено", reply_markup=get_vehicles_keyboard())
         return
+    
     number = message.text.strip().upper()
+    
     if len(number) < 3:
         await message.answer("❌ Номер слишком короткий. Минимум 3 символа.")
         return
+    
+    # Проверка существования
     existing = Database.get_vehicle_by_number(number)
     if existing:
         await message.answer(
-            f"❌ Автомобиль <b>{number}</b> уже существует!\nВведите другой номер:"
+            f"❌ Автомобиль <b>{number}</b> уже существует!\n"
+            "Введите другой номер:"
         )
         return
+    
     await state.update_data(number=number)
     await message.answer(
         "⛽ Введите норму расхода топлива (л/км):\n"
@@ -887,17 +1065,21 @@ async def add_vehicle_number(message: Message, state: FSMContext):
 
 @router.message(AddVehicleStates.fuel_rate)
 async def add_vehicle_fuel_rate(message: Message, state: FSMContext):
+    """Обработка нормы расхода"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("Добавление отменено", reply_markup=get_vehicles_keyboard())
         return
+    
     if not validate_number(message.text):
         await message.answer("❌ Введите корректное число (например: 0.120):")
         return
+    
     fuel_rate = float(message.text)
     if not (0.001 <= fuel_rate <= 5):
         await message.answer("❌ Норма расхода должна быть от 0.001 до 5 л/км:")
         return
+    
     await state.update_data(fuel_rate=fuel_rate)
     await message.answer(
         "⏱️ Введите перерасход топлива в час простоя (л/ч):\n"
@@ -908,19 +1090,24 @@ async def add_vehicle_fuel_rate(message: Message, state: FSMContext):
 
 @router.message(AddVehicleStates.idle_rate)
 async def add_vehicle_idle_rate(message: Message, state: FSMContext):
+    """Обработка перерасхода при простое"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("Добавление отменено", reply_markup=get_vehicles_keyboard())
         return
+    
     if not validate_number(message.text):
         await message.answer("❌ Введите корректное число (например: 2.000):")
         return
+    
     idle_rate = float(message.text)
     if not (0.100 <= idle_rate <= 10):
         await message.answer("❌ Перерасход должен быть от 0.100 до 10 л/ч:")
         return
+    
     data = await state.get_data()
     vehicle_id = Database.add_vehicle(data['number'], data['fuel_rate'], idle_rate)
+    
     if vehicle_id:
         await message.answer(
             f"✅ <b>Автомобиль успешно добавлен!</b>\n\n"
@@ -937,17 +1124,22 @@ async def add_vehicle_idle_rate(message: Message, state: FSMContext):
             f"❌ Не удалось добавить автомобиль {data['number']}",
             reply_markup=get_vehicles_keyboard()
         )
+    
     await state.clear()
 
+# 🗑️ Удалить автомобиль
 @router.message(F.text == "🗑️ Удалить автомобиль")
 async def delete_vehicle_start(message: Message, state: FSMContext):
+    """Начало удаления автомобиля"""
     vehicles = Database.get_vehicles()
+    
     if not vehicles:
         await message.answer(
             "❌ В базе нет автомобилей для удаления.",
             reply_markup=get_vehicles_keyboard()
         )
         return
+    
     await state.update_data(vehicles=vehicles)
     await message.answer(
         "🚗 Выберите автомобиль для удаления:\n"
@@ -958,19 +1150,29 @@ async def delete_vehicle_start(message: Message, state: FSMContext):
 
 @router.message(DeleteVehicleStates.select_vehicle, F.text.startswith("🚙 "))
 async def delete_vehicle_select(message: Message, state: FSMContext):
-    vehicle_number = message.text[2:].strip()
+    """Выбор автомобиля для удаления"""
+    vehicle_number = message.text[2:].strip()  # Убираем эмодзи
+    
     data = await state.get_data()
     vehicles = data.get('vehicles', [])
+    
+    # Находим автомобиль
     vehicle = None
     for v in vehicles:
         if v['number'] == vehicle_number:
             vehicle = v
             break
+    
     if not vehicle:
         await message.answer("❌ Автомобиль не найден", reply_markup=get_vehicles_keyboard())
         await state.clear()
         return
-    await state.update_data(vehicle_id=vehicle['id'], vehicle_number=vehicle['number'])
+    
+    await state.update_data(
+        vehicle_id=vehicle['id'],
+        vehicle_number=vehicle['number']
+    )
+    
     await message.answer(
         f"⚠️ <b>ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ</b>\n\n"
         f"Вы действительно хотите удалить автомобиль?\n\n"
@@ -988,9 +1190,11 @@ async def delete_vehicle_select(message: Message, state: FSMContext):
 
 @router.message(DeleteVehicleStates.confirm_delete, F.text == "✅ Да, удалить")
 async def delete_vehicle_confirm(message: Message, state: FSMContext):
+    """Подтверждение удаления"""
     data = await state.get_data()
     vehicle_id = data.get('vehicle_id')
     vehicle_number = data.get('vehicle_number')
+    
     if Database.delete_vehicle(vehicle_id):
         await message.answer(
             f"✅ Автомобиль <b>{vehicle_number}</b> успешно удален!\n"
@@ -1003,22 +1207,30 @@ async def delete_vehicle_confirm(message: Message, state: FSMContext):
             f"❌ Ошибка при удалении автомобиля {vehicle_number}",
             reply_markup=get_vehicles_keyboard()
         )
+    
     await state.clear()
 
 @router.message(DeleteVehicleStates.confirm_delete, F.text == "❌ Нет, отменить")
 async def delete_vehicle_cancel(message: Message, state: FSMContext):
+    """Отмена удаления"""
     data = await state.get_data()
     vehicle_number = data.get('vehicle_number', 'автомобиль')
+    
     await message.answer(
         f"✅ Удаление автомобиля <b>{vehicle_number}</b> отменено.",
         reply_markup=get_vehicles_keyboard()
     )
     await state.clear()
 
+# ════════════════════════════════════════════════════════════════════════════
+# 📝 НОВЫЙ ПУТЕВОЙ ЛИСТ
+# ════════════════════════════════════════════════════════════════════════════
 
 @router.message(F.text == "📝 Новый путевой лист")
 async def new_waybill(message: Message, state: FSMContext):
+    """Начало создания путевого листа"""
     vehicles = Database.get_vehicles()
+    
     if not vehicles:
         await message.answer(
             "❌ В базе нет автомобилей.\n"
@@ -1026,6 +1238,7 @@ async def new_waybill(message: Message, state: FSMContext):
             reply_markup=get_main_keyboard()
         )
         return
+    
     await state.update_data(vehicles=vehicles)
     await message.answer(
         "🚗 Выберите автомобиль для путевого листа:",
@@ -1035,25 +1248,35 @@ async def new_waybill(message: Message, state: FSMContext):
 
 @router.message(WaybillStates.vehicle_selected, F.text.startswith("🚙 "))
 async def waybill_vehicle_selected(message: Message, state: FSMContext):
+    """Выбор автомобиля для путевого листа"""
     vehicle_number = message.text[2:].strip()
+    
     data = await state.get_data()
     vehicles = data.get('vehicles', [])
+    
+    # Находим автомобиль
     vehicle = None
     for v in vehicles:
         if v['number'] == vehicle_number:
             vehicle = v
             break
+    
     if not vehicle:
         await message.answer("❌ Автомобиль не найден", reply_markup=get_main_keyboard())
         await state.clear()
         return
+    
     user_id = message.from_user.id
+    
+    # Получаем полную информацию об автомобиле
     vehicle_info = Database.get_vehicle(vehicle['id'])
     if not vehicle_info:
-        await message.answer("❌ Ошибка получения информации об автомобиле",
-                             reply_markup=get_main_keyboard())
+        await message.answer("❌ Ошибка получения информации об автомобиле", 
+                           reply_markup=get_main_keyboard())
         await state.clear()
         return
+    
+    # Сохраняем данные
     await state.update_data(
         vehicle_id=vehicle_info['id'],
         vehicle_number=vehicle_info['number'],
@@ -1061,13 +1284,17 @@ async def waybill_vehicle_selected(message: Message, state: FSMContext):
         idle_rate=vehicle_info['idle_rate'],
         user_id=user_id
     )
+    
+    # Проверяем последний путевой лист
     last_waybill = Database.get_last_waybill(vehicle_info['id'], user_id)
+    
     if last_waybill:
         await state.update_data(
             previous_odo=last_waybill['odo_end'],
             previous_fuel=last_waybill['fuel_end'],
             previous_date=last_waybill['date']
         )
+        
         await message.answer(
             f"🚗 <b>Автомобиль:</b> {vehicle_info['number']}\n\n"
             f"📅 <b>Последний путевой лист:</b> {last_waybill['date']}\n"
@@ -1085,24 +1312,36 @@ async def waybill_vehicle_selected(message: Message, state: FSMContext):
         )
         await state.set_state(WaybillStates.start_time)
 
+# Обработчики состояний путевого листа
+
 @router.message(WaybillStates.start_time)
 async def waybill_start_time(message: Message, state: FSMContext):
+    """Обработка времени начала"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
         return
+    
     if not validate_time(message.text):
         await message.answer(
             "❌ Неверный формат времени. Введите время в формате <b>ЧЧ:ММ</b>\n"
-            "<i>Примеры: 06:30, 6:30, 06.30, 06:30:00, 6.30</i>\n\nНажмите ❌ Отмена для отмены",
+            "<i>Примеры: 06:30, 6:30, 06.30, 06:30:00, 6.30</i>\n\n"
+            "Нажмите ❌ Отмена для отмены",
             reply_markup=get_cancel_keyboard(),
             parse_mode="HTML"
         )
         return
+    
+    # Нормализуем время
     start_time = normalize_time(message.text)
+    
     await state.update_data(start_time=start_time)
+    
+    # Проверяем, есть ли уже данные об одометре и топливе (из предыдущего дня)
     data = await state.get_data()
+    
     if data.get('odo_start') is not None and data.get('fuel_start') is not None:
+        # Данные уже есть (из предыдущего дня), переходим сразу к времени возвращения
         await message.answer(
             f"🚗 <b>Автомобиль:</b> {data.get('vehicle_number', 'неизвестно')}\n"
             f"🕒 <b>Время выпуска:</b> {start_time}\n"
@@ -1113,6 +1352,7 @@ async def waybill_start_time(message: Message, state: FSMContext):
         )
         await state.set_state(WaybillStates.end_time)
     else:
+        # Данных нет, запрашиваем одометр
         await message.answer(
             f"🕒 <b>Время выпуска:</b> {start_time}\n\n"
             f"📊 Введите показания одометра на начало дня (км):",
@@ -1122,21 +1362,26 @@ async def waybill_start_time(message: Message, state: FSMContext):
 
 @router.message(WaybillStates.odo_start)
 async def waybill_odo_start(message: Message, state: FSMContext):
+    """Обработка показаний одометра на начало"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
         return
+    
     if not validate_number(message.text):
         await message.answer(
             "❌ Неверный формат числа. Введите показания одометра (например, 123456) или нажмите ❌ Отмена",
             reply_markup=get_cancel_keyboard()
         )
         return
+    
     odo_start = float(message.text)
     if odo_start < 0:
         await message.answer("❌ Показания одометра не могут быть отрицательными")
         return
+    
     await state.update_data(odo_start=odo_start)
+    
     await message.answer(
         f"🛣 <b>Одометр на начало:</b> {odo_start:.0f} км\n\n"
         f"⛽ Введите количество топлива на начало дня (л):",
@@ -1146,22 +1391,28 @@ async def waybill_odo_start(message: Message, state: FSMContext):
 
 @router.message(WaybillStates.fuel_start)
 async def waybill_fuel_start(message: Message, state: FSMContext):
+    """Обработка топлива на начало"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
         return
+    
     if not validate_number(message.text):
         await message.answer(
             "❌ Неверный формат числа. Введите количество топлива (например, 25.572) или нажмите ❌ Отмена",
             reply_markup=get_cancel_keyboard()
         )
         return
+    
     fuel_start = float(message.text)
     if fuel_start < 0:
         await message.answer("❌ Количество топлива не может быть отрицательным")
         return
+    
     await state.update_data(fuel_start=fuel_start)
+    
     data = await state.get_data()
+    
     await message.answer(
         f"🚗 <b>Автомобиль:</b> {data.get('vehicle_number', 'неизвестно')}\n"
         f"🕒 <b>Время выпуска:</b> {data.get('start_time', 'не указано')}\n"
@@ -1174,28 +1425,39 @@ async def waybill_fuel_start(message: Message, state: FSMContext):
 
 @router.message(WaybillStates.end_time)
 async def waybill_end_time(message: Message, state: FSMContext):
+    """Обработка времени возвращения"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
         return
+    
     if not validate_time(message.text):
         await message.answer(
             "❌ Неверный формат времени. Введите время в формате <b>ЧЧ:ММ</b>\n"
-            "<i>Примеры: 20:00, 8:00, 20.00, 20:00:00, 8.00</i>\n\nНажмите ❌ Отмена для отмены",
+            "<i>Примеры: 20:00, 8:00, 20.00, 20:00:00, 8.00</i>\n\n"
+            "Нажмите ❌ Отмена для отмены",
             reply_markup=get_cancel_keyboard(),
             parse_mode="HTML"
         )
         return
+    
+    # Нормализуем время
     end_time = normalize_time(message.text)
+    
     data = await state.get_data()
     start_time = data.get('start_time')
+    
     if not start_time:
         await message.answer("❌ Ошибка: не найдено время начала")
         await state.clear()
         return
+    
+    # Расчет времени работы
     hours, minutes = calculate_hours_minutes(start_time, end_time)
     hours_decimal = calculate_hours_decimal(start_time, end_time)
+    
     await state.update_data(end_time=end_time, hours=hours_decimal)
+    
     await message.answer(
         f"🕒 <b>Время возвращения:</b> {end_time}\n"
         f"⏱ <b>Всего времени:</b> {format_time_duration(hours, minutes)}\n\n"
@@ -1206,19 +1468,23 @@ async def waybill_end_time(message: Message, state: FSMContext):
 
 @router.message(WaybillStates.odo_end)
 async def waybill_odo_end(message: Message, state: FSMContext):
+    """Обработка показаний одометра на конец"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
         return
+    
     if not validate_number(message.text):
         await message.answer(
             "❌ Неверный формат числа. Введите показания одометра (например, 123500) или нажмите ❌ Отмена",
             reply_markup=get_cancel_keyboard()
         )
         return
+    
     odo_end = float(message.text)
     data = await state.get_data()
     odo_start = data.get('odo_start', 0)
+    
     if odo_end < odo_start:
         await message.answer(
             f"❌ Показания одометра на конец ({odo_end:.0f} км) "
@@ -1226,10 +1492,17 @@ async def waybill_odo_end(message: Message, state: FSMContext):
             f"Введите корректные данные:"
         )
         return
+    
     distance = odo_end - odo_start
     fuel_rate = data.get('fuel_rate', 0)
     fuel_norm = distance * fuel_rate
-    await state.update_data(odo_end=odo_end, distance=distance, fuel_norm=fuel_norm)
+    
+    await state.update_data(
+        odo_end=odo_end,
+        distance=distance,
+        fuel_norm=fuel_norm
+    )
+    
     await message.answer(
         f"🛣 <b>Одометр на конец:</b> {odo_end:.0f} км\n"
         f"📏 <b>Пройдено расстояние:</b> {distance:.0f} км\n"
@@ -1244,15 +1517,22 @@ async def waybill_odo_end(message: Message, state: FSMContext):
 
 @router.message(WaybillStates.initial_data_choice)
 async def waybill_initial_data_choice(message: Message, state: FSMContext):
+    """Обработка выбора начальных данных"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
         return
+    
     if message.text == "✅ Использовать данные предыдущего дня":
         data = await state.get_data()
         previous_odo = data.get('previous_odo', 0)
         previous_fuel = data.get('previous_fuel', 0)
-        await state.update_data(odo_start=previous_odo, fuel_start=previous_fuel)
+        
+        await state.update_data(
+            odo_start=previous_odo,
+            fuel_start=previous_fuel
+        )
+        
         await message.answer(
             f"✅ Используем данные предыдущего дня:\n"
             f"🛣 <b>Одометр:</b> {previous_odo:.0f} км\n"
@@ -1261,6 +1541,7 @@ async def waybill_initial_data_choice(message: Message, state: FSMContext):
             reply_markup=get_cancel_keyboard()
         )
         await state.set_state(WaybillStates.start_time)
+        
     elif message.text == "✏️ Ввести вручную":
         await message.answer(
             "📊 Введите показания одометра на начало дня (км):",
@@ -1275,19 +1556,23 @@ async def waybill_initial_data_choice(message: Message, state: FSMContext):
 
 @router.message(WaybillStates.overuse_choice)
 async def waybill_overuse_choice(message: Message, state: FSMContext):
+    """Обработка выбора способа учета перерасхода"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
         return
+    
     if message.text == "🕒 Рассчитать по простому":
         data = await state.get_data()
         idle_rate = data.get('idle_rate', 2.0)
+        
         await message.answer(
             f"⏱️ Введите количество часов простоя (например: 1.5):\n"
             f"<i>Норма расхода при простое: {format_volume(idle_rate)} л/ч</i>",
             reply_markup=get_skip_keyboard()
         )
         await state.set_state(WaybillStates.overuse_hours)
+        
     elif message.text == "✏️ Ввести перерасход вручную":
         await message.answer(
             "⛽ Введите количество перерасходованного топлива (л):\n"
@@ -1295,8 +1580,14 @@ async def waybill_overuse_choice(message: Message, state: FSMContext):
             reply_markup=get_cancel_keyboard()
         )
         await state.set_state(WaybillStates.overuse_manual)
+        
     elif message.text == "✅ Нет перерасхода":
-        await state.update_data(overuse=0, overuse_hours=0, overuse_calculated=0)
+        await state.update_data(
+            overuse=0,
+            overuse_hours=0,
+            overuse_calculated=0
+        )
+        
         data = await state.get_data()
         await message.answer(
             f"🚗 <b>Автомобиль:</b> {data.get('vehicle_number')}\n\n"
@@ -1313,10 +1604,12 @@ async def waybill_overuse_choice(message: Message, state: FSMContext):
 
 @router.message(WaybillStates.overuse_hours)
 async def waybill_overuse_hours(message: Message, state: FSMContext):
+    """Обработка часов простоя"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
         return
+    
     if message.text == "⏭ Пропустить":
         await state.update_data(overuse_hours=0, overuse_calculated=0, overuse=0)
     elif not validate_number(message.text):
@@ -1333,12 +1626,20 @@ async def waybill_overuse_hours(message: Message, state: FSMContext):
                 reply_markup=get_skip_keyboard()
             )
             return
+        
         data = await state.get_data()
         idle_rate = data.get('idle_rate', 2.0)
         overuse = overuse_hours * idle_rate
-        await state.update_data(overuse_hours=overuse_hours, overuse_calculated=1, overuse=overuse)
+        
+        await state.update_data(
+            overuse_hours=overuse_hours,
+            overuse_calculated=1,
+            overuse=overuse
+        )
+    
     data = await state.get_data()
     overuse = data.get('overuse', 0)
+    
     await message.answer(
         f"✅ Перерасход по простому: {format_volume(overuse)} л\n\n"
         "📊 Теперь введите экономию топлива (л):\n"
@@ -1349,21 +1650,30 @@ async def waybill_overuse_hours(message: Message, state: FSMContext):
 
 @router.message(WaybillStates.overuse_manual)
 async def waybill_overuse_manual(message: Message, state: FSMContext):
+    """Обработка ручного ввода перерасхода"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
         return
+    
     if not validate_number(message.text):
         await message.answer(
             "❌ Неверный формат числа. Введите количество перерасхода (например, 2.500) или нажмите ❌ Отмена",
             reply_markup=get_cancel_keyboard()
         )
         return
+    
     overuse = float(message.text)
     if overuse < 0:
         await message.answer("❌ Перерасход не может быть отрицательным")
         return
-    await state.update_data(overuse=overuse, overuse_hours=0, overuse_calculated=0)
+    
+    await state.update_data(
+        overuse=overuse,
+        overuse_hours=0,
+        overuse_calculated=0
+    )
+    
     await message.answer(
         f"✅ Перерасход учтен: {format_volume(overuse)} л\n\n"
         "📊 Теперь введите экономию топлива (л):\n"
@@ -1374,10 +1684,12 @@ async def waybill_overuse_manual(message: Message, state: FSMContext):
 
 @router.message(WaybillStates.economy)
 async def waybill_economy(message: Message, state: FSMContext):
+    """Обработка экономии топлива"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
         return
+    
     if message.text == "⏭ Пропустить":
         economy = 0
     elif not validate_number(message.text):
@@ -1394,13 +1706,19 @@ async def waybill_economy(message: Message, state: FSMContext):
                 reply_markup=get_skip_keyboard()
             )
             return
+    
     await state.update_data(economy=economy)
+    
     data = await state.get_data()
+    
+    # Автоматически рассчитываем остаток топлива на конец дня
     fuel_start = data.get('fuel_start', 0)
     fuel_norm = data.get('fuel_norm', 0)
     overuse = data.get('overuse', 0)
     fuel_actual = fuel_norm + overuse - economy
     fuel_end = fuel_start - fuel_actual
+    
+    # Проверяем, не отрицательный ли остаток
     if fuel_end < 0:
         await message.answer(
             f"⚠️ <b>Внимание!</b> Отрицательный остаток топлива: {format_volume(fuel_end)} л\n"
@@ -1408,25 +1726,36 @@ async def waybill_economy(message: Message, state: FSMContext):
             f"⛽ <b>Как ввести остаток топлива на конец дня?</b>",
             reply_markup=get_fuel_end_keyboard()
         )
-        await state.set_state(WaybillStates.fuel_end_choice)
     else:
-        await state.update_data(fuel_actual=fuel_actual, fuel_end=fuel_end, fuel_end_manual=0)
+        await state.update_data(
+            fuel_actual=fuel_actual,
+            fuel_end=fuel_end,
+            fuel_end_manual=0
+        )
+        
         await save_and_show_waybill(message, state)
 
 @router.message(WaybillStates.fuel_end_choice)
 async def waybill_fuel_end_choice(message: Message, state: FSMContext):
+    """Обработка выбора способа ввода остатка топлива"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
         return
+    
     if message.text == "📊 Рассчитать автоматически":
         data = await state.get_data()
         fuel_start = data.get('fuel_start', 0)
         fuel_norm = data.get('fuel_norm', 0)
         overuse = data.get('overuse', 0)
         economy = data.get('economy', 0)
+        
+        # Расчет фактического расхода
         fuel_actual = fuel_norm + overuse - economy
+        
+        # Расчет остатка
         fuel_end = fuel_start - fuel_actual
+        
         if fuel_end < 0:
             await message.answer(
                 f"⚠️ <b>Внимание!</b> Отрицательный остаток топлива: {format_volume(fuel_end)} л\n"
@@ -1435,8 +1764,15 @@ async def waybill_fuel_end_choice(message: Message, state: FSMContext):
                 reply_markup=get_fuel_end_keyboard()
             )
             return
-        await state.update_data(fuel_actual=fuel_actual, fuel_end=fuel_end, fuel_end_manual=0)
+        
+        await state.update_data(
+            fuel_actual=fuel_actual,
+            fuel_end=fuel_end,
+            fuel_end_manual=0
+        )
+        
         await save_and_show_waybill(message, state)
+        
     elif message.text == "✏️ Ввести остаток вручную":
         await message.answer(
             "⛽ Введите остаток топлива на конец дня (л):\n"
@@ -1444,6 +1780,7 @@ async def waybill_fuel_end_choice(message: Message, state: FSMContext):
             reply_markup=get_cancel_keyboard()
         )
         await state.set_state(WaybillStates.fuel_end_manual)
+        
     elif message.text == "⛽ Добавить заправку":
         await message.answer(
             "⛽ Введите количество заправленного топлива (л):\n"
@@ -1459,28 +1796,37 @@ async def waybill_fuel_end_choice(message: Message, state: FSMContext):
 
 @router.message(WaybillStates.fuel_refuel)
 async def waybill_fuel_refuel(message: Message, state: FSMContext):
+    """Обработка заправки топлива"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
         return
+    
     if not validate_number(message.text):
         await message.answer(
             "❌ Неверный формат числа. Введите количество топлива (например, 20.000) или нажмите ❌ Отмена",
             reply_markup=get_cancel_keyboard()
         )
         return
+    
     fuel_refuel = float(message.text)
     if fuel_refuel < 0:
         await message.answer("❌ Количество топлива не может быть отрицательным")
         return
+    
     await state.update_data(fuel_refuel=fuel_refuel)
+    
+    # После ввода заправки автоматически рассчитываем остаток
     data = await state.get_data()
     fuel_start = data.get('fuel_start', 0)
     fuel_norm = data.get('fuel_norm', 0)
     overuse = data.get('overuse', 0)
     economy = data.get('economy', 0)
+    
+    # Расчет фактического расхода с учетом заправки
     fuel_actual = fuel_norm + overuse - economy
     fuel_end = fuel_start + fuel_refuel - fuel_actual
+    
     if fuel_end < 0:
         await message.answer(
             f"⚠️ <b>Внимание!</b> Отрицательный остаток топлива: {format_volume(fuel_end)} л\n"
@@ -1490,36 +1836,62 @@ async def waybill_fuel_refuel(message: Message, state: FSMContext):
         )
         await state.set_state(WaybillStates.fuel_end_manual)
     else:
-        await state.update_data(fuel_actual=fuel_actual, fuel_end=fuel_end, fuel_end_manual=0)
+        await state.update_data(
+            fuel_actual=fuel_actual,
+            fuel_end=fuel_end,
+            fuel_end_manual=0
+        )
+        
         await save_and_show_waybill(message, state)
 
 @router.message(WaybillStates.fuel_end_manual)
 async def waybill_fuel_end_manual(message: Message, state: FSMContext):
+    """Обработка ручного ввода остатка топлива"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("✅ Действие отменено", reply_markup=get_main_keyboard())
         return
+    
     if not validate_number(message.text):
         await message.answer(
             "❌ Неверный формат числа. Введите количество топлива (например, 15.500) или нажмите ❌ Отмена",
             reply_markup=get_cancel_keyboard()
         )
         return
+    
     fuel_end = float(message.text)
     if fuel_end < 0:
         await message.answer("❌ Остаток топлива не может быть отрицательным")
         return
+    
     data = await state.get_data()
     fuel_start = data.get('fuel_start', 0)
     fuel_refuel = data.get('fuel_refuel', 0)
+    fuel_norm = data.get('fuel_norm', 0)
+    overuse = data.get('overuse', 0)
+    economy = data.get('economy', 0)
+    
+    # Расчет фактического расхода с учетом заправки
     fuel_actual = fuel_start + fuel_refuel - fuel_end
-    await state.update_data(fuel_end=fuel_end, fuel_actual=fuel_actual, fuel_end_manual=1)
+    
+    await state.update_data(
+        fuel_end=fuel_end,
+        fuel_actual=fuel_actual,
+        fuel_end_manual=1
+    )
+    
     await save_and_show_waybill(message, state)
 
+# ════════════════════════════════════════════════════════════════════════════
+# 📊 ОБРАБОТКА НЕИЗВЕСТНЫХ КОМАНД
+# ════════════════════════════════════════════════════════════════════════════
 
 @router.message()
 async def unknown_command(message: Message):
+    """Обработка неизвестных команд"""
     logger.info(f"❓ Неизвестная команда от {message.from_user.id}: {message.text}")
+    
+    # Проверяем, не является ли это числом (возможно, пользователь пытается ввести данные)
     if validate_number(message.text):
         await message.answer(
             "⚠️ Вы ввели число, но не находитесь в процессе ввода данных.\n\n"
@@ -1536,32 +1908,47 @@ async def unknown_command(message: Message):
             reply_markup=get_main_keyboard()
         )
 
+# ════════════════════════════════════════════════════════════════════════════
+# 🚀 ЗАПУСК БОТА
+# ════════════════════════════════════════════════════════════════════════════
 
 async def on_startup():
+    """Запуск при старте бота"""
     logger.info("=" * 60)
-    logger.info("🚀 Бот учета путевых листов v2.1")
+    logger.info("🚀 Бот учета путевых листов")
     logger.info("=" * 60)
+    
+    # Инициализация базы данных
     init_database()
+    
+    # Проверка окружения
     db_path = get_db_path()
     logger.info(f"📊 Путь к БД: {db_path}")
     logger.info(f"📁 Volume /data: {'подключен' if os.path.exists('/data') else 'не подключен'}")
+    
+    # Информация о боте
     bot_info = await bot.get_me()
     logger.info(f"🤖 Бот: @{bot_info.username}")
     logger.info(f"🆔 ID: {bot_info.id}")
+    
+    # Информация о БД
     db_info = Database.get_database_info()
     logger.info(f"📁 Размер БД: {db_info.get('size', 0) / 1024:.1f} КБ")
     logger.info(f"🚗 Автомобилей: {db_info.get('vehicles_count', 0)}")
     logger.info(f"📝 Путевых листов: {db_info.get('waybills_count', 0)}")
+    
     logger.info("=" * 60)
     logger.info("✅ БОТ ГОТОВ К РАБОТЕ")
     logger.info("=" * 60)
 
 async def on_shutdown():
+    """Очистка при завершении работы"""
     logger.info("🔄 Завершение работы бота...")
     await bot.session.close()
     logger.info("✅ Ресурсы очищены")
 
 async def main():
+    """Основная функция запуска"""
     try:
         await on_startup()
         await bot.delete_webhook(drop_pending_updates=True)
