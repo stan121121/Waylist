@@ -747,8 +747,11 @@ def validate_number(value: str) -> bool:
         return False
 
 def format_volume(value: float) -> str:
-    """Форматирование объема топлива с 3 знаками после запятой"""
-    return f"{value:.3f}".rstrip('0').rstrip('.')
+    """Форматирование объема топлива с 3 знаками после запятой (без обрезания нулей)"""
+    # Округляем до 3 знаков для единообразия перед форматированием
+    rounded = round(value, 3)
+    # Всегда показываем 3 знака, удаляем лишние нули в конце, но оставляем один ноль если нужно
+    return f"{rounded:.3f}".rstrip('0').rstrip('.') if rounded % 1 != 0 else f"{rounded:.0f}"
 
 async def save_and_show_waybill(message: Message, state: FSMContext):
     """Сохранение и отображение путевого листа"""
@@ -756,6 +759,11 @@ async def save_and_show_waybill(message: Message, state: FSMContext):
     
     # Добавляем дату
     data['date'] = datetime.now().strftime('%Y-%m-%d')
+    
+    # Округляем все топливные значения до 3 знаков перед сохранением
+    for key in ['fuel_norm', 'overuse', 'economy', 'fuel_actual', 'fuel_end', 'fuel_refuel']:
+        if key in data:
+            data[key] = round(data[key], 3)
     
     # Сохраняем путевой лист
     waybill_id = Database.save_waybill(data)
@@ -1058,7 +1066,7 @@ async def add_vehicle_number(message: Message, state: FSMContext):
     await state.update_data(number=number)
     await message.answer(
         "⛽ Введите норму расхода топлива (л/км):\n"
-        "<i>Например: 0.120 (3 знака после запятой)</i>",
+        "<i>Например: 0.12144 (можно до 5 знаков)</i>",
         reply_markup=get_cancel_keyboard()
     )
     await state.set_state(AddVehicleStates.fuel_rate)
@@ -1072,7 +1080,7 @@ async def add_vehicle_fuel_rate(message: Message, state: FSMContext):
         return
     
     if not validate_number(message.text):
-        await message.answer("❌ Введите корректное число (например: 0.120):")
+        await message.answer("❌ Введите корректное число (например: 0.12144):")
         return
     
     fuel_rate = float(message.text)
@@ -1289,9 +1297,11 @@ async def waybill_vehicle_selected(message: Message, state: FSMContext):
     last_waybill = Database.get_last_waybill(vehicle_info['id'], user_id)
     
     if last_waybill:
+        # Округляем остаток топлива из предыдущего дня
+        previous_fuel = round(last_waybill['fuel_end'], 3)
         await state.update_data(
             previous_odo=last_waybill['odo_end'],
-            previous_fuel=last_waybill['fuel_end'],
+            previous_fuel=previous_fuel,
             previous_date=last_waybill['date']
         )
         
@@ -1299,7 +1309,7 @@ async def waybill_vehicle_selected(message: Message, state: FSMContext):
             f"🚗 <b>Автомобиль:</b> {vehicle_info['number']}\n\n"
             f"📅 <b>Последний путевой лист:</b> {last_waybill['date']}\n"
             f"🛣 <b>Одометр на конец дня:</b> {last_waybill['odo_end']:.0f} км\n"
-            f"⛽ <b>Остаток топлива:</b> {format_volume(last_waybill['fuel_end'])} л\n\n"
+            f"⛽ <b>Остаток топлива:</b> {format_volume(previous_fuel)} л\n\n"
             f"<b>Использовать эти данные как начальные для нового дня?</b>",
             reply_markup=get_initial_data_keyboard()
         )
@@ -1409,6 +1419,8 @@ async def waybill_fuel_start(message: Message, state: FSMContext):
         await message.answer("❌ Количество топлива не может быть отрицательным")
         return
     
+    # Округляем до 3 знаков
+    fuel_start = round(fuel_start, 3)
     await state.update_data(fuel_start=fuel_start)
     
     data = await state.get_data()
@@ -1495,7 +1507,7 @@ async def waybill_odo_end(message: Message, state: FSMContext):
     
     distance = odo_end - odo_start
     fuel_rate = data.get('fuel_rate', 0)
-    fuel_norm = distance * fuel_rate
+    fuel_norm = round(distance * fuel_rate, 3)
     
     await state.update_data(
         odo_end=odo_end,
@@ -1629,7 +1641,7 @@ async def waybill_overuse_hours(message: Message, state: FSMContext):
         
         data = await state.get_data()
         idle_rate = data.get('idle_rate', 2.0)
-        overuse = overuse_hours * idle_rate
+        overuse = round(overuse_hours * idle_rate, 3)
         
         await state.update_data(
             overuse_hours=overuse_hours,
@@ -1663,7 +1675,7 @@ async def waybill_overuse_manual(message: Message, state: FSMContext):
         )
         return
     
-    overuse = float(message.text)
+    overuse = round(float(message.text), 3)
     if overuse < 0:
         await message.answer("❌ Перерасход не может быть отрицательным")
         return
@@ -1699,7 +1711,7 @@ async def waybill_economy(message: Message, state: FSMContext):
         )
         return
     else:
-        economy = float(message.text)
+        economy = round(float(message.text), 3)
         if economy < 0:
             await message.answer(
                 "❌ Экономия не может быть отрицательной. Введите положительное число или 0",
@@ -1715,11 +1727,12 @@ async def waybill_economy(message: Message, state: FSMContext):
     fuel_start = data.get('fuel_start', 0)
     fuel_norm = data.get('fuel_norm', 0)
     overuse = data.get('overuse', 0)
-    fuel_actual = fuel_norm + overuse - economy
-    fuel_end = fuel_start - fuel_actual
+    fuel_actual = round(fuel_norm + overuse - economy, 3)
+    fuel_end = round(fuel_start - fuel_actual, 3)
     
     # Проверяем, не отрицательный ли остаток
     if fuel_end < 0:
+        await state.update_data(fuel_actual=fuel_actual, fuel_end=fuel_end)
         await message.answer(
             f"⚠️ <b>Внимание!</b> Отрицательный остаток топлива: {format_volume(fuel_end)} л\n"
             f"Возможно, была заправка или введены неверные данные.\n\n"
@@ -1751,12 +1764,13 @@ async def waybill_fuel_end_choice(message: Message, state: FSMContext):
         economy = data.get('economy', 0)
         
         # Расчет фактического расхода
-        fuel_actual = fuel_norm + overuse - economy
+        fuel_actual = round(fuel_norm + overuse - economy, 3)
         
         # Расчет остатка
-        fuel_end = fuel_start - fuel_actual
+        fuel_end = round(fuel_start - fuel_actual, 3)
         
         if fuel_end < 0:
+            await state.update_data(fuel_actual=fuel_actual, fuel_end=fuel_end)
             await message.answer(
                 f"⚠️ <b>Внимание!</b> Отрицательный остаток топлива: {format_volume(fuel_end)} л\n"
                 f"Возможно, была заправка или введены неверные данные.\n\n"
@@ -1809,7 +1823,7 @@ async def waybill_fuel_refuel(message: Message, state: FSMContext):
         )
         return
     
-    fuel_refuel = float(message.text)
+    fuel_refuel = round(float(message.text), 3)
     if fuel_refuel < 0:
         await message.answer("❌ Количество топлива не может быть отрицательным")
         return
@@ -1824,10 +1838,11 @@ async def waybill_fuel_refuel(message: Message, state: FSMContext):
     economy = data.get('economy', 0)
     
     # Расчет фактического расхода с учетом заправки
-    fuel_actual = fuel_norm + overuse - economy
-    fuel_end = fuel_start + fuel_refuel - fuel_actual
+    fuel_actual = round(fuel_norm + overuse - economy, 3)
+    fuel_end = round(fuel_start + fuel_refuel - fuel_actual, 3)
     
     if fuel_end < 0:
+        await state.update_data(fuel_actual=fuel_actual, fuel_end=fuel_end)
         await message.answer(
             f"⚠️ <b>Внимание!</b> Отрицательный остаток топлива: {format_volume(fuel_end)} л\n"
             f"Возможно, введены неверные данные.\n\n"
@@ -1859,7 +1874,7 @@ async def waybill_fuel_end_manual(message: Message, state: FSMContext):
         )
         return
     
-    fuel_end = float(message.text)
+    fuel_end = round(float(message.text), 3)
     if fuel_end < 0:
         await message.answer("❌ Остаток топлива не может быть отрицательным")
         return
@@ -1872,7 +1887,7 @@ async def waybill_fuel_end_manual(message: Message, state: FSMContext):
     economy = data.get('economy', 0)
     
     # Расчет фактического расхода с учетом заправки
-    fuel_actual = fuel_start + fuel_refuel - fuel_end
+    fuel_actual = round(fuel_start + fuel_refuel - fuel_end, 3)
     
     await state.update_data(
         fuel_end=fuel_end,
