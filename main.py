@@ -1697,6 +1697,7 @@ async def waybill_overuse_manual(message: Message, state: FSMContext):
     )
     await state.set_state(WaybillStates.economy)
 
+# ========= ИСПРАВЛЕННЫЙ ОБРАБОТЧИК ЭКОНОМИИ =========
 @router.message(WaybillStates.economy)
 async def waybill_economy(message: Message, state: FSMContext):
     """Обработка экономии топлива"""
@@ -1724,32 +1725,23 @@ async def waybill_economy(message: Message, state: FSMContext):
     
     await state.update_data(economy=economy)
     
+    # Рассчитываем фактический расход (без остатка)
     data = await state.get_data()
-    
-    # Автоматически рассчитываем остаток топлива на конец дня
-    fuel_start = data.get('fuel_start', 0)
     fuel_norm = data.get('fuel_norm', 0)
     overuse = data.get('overuse', 0)
     fuel_actual = round(fuel_norm + overuse - economy, 3)
-    fuel_end = round(fuel_start - fuel_actual, 3)
+    await state.update_data(fuel_actual=fuel_actual)
     
-    # Проверяем, не отрицательный ли остаток
-    if fuel_end < 0:
-        await state.update_data(fuel_actual=fuel_actual, fuel_end=fuel_end)
-        await message.answer(
-            f"⚠️ <b>Внимание!</b> Отрицательный остаток топлива: {format_volume(fuel_end)} л\n"
-            f"Возможно, была заправка или введены неверные данные.\n\n"
-            f"⛽ <b>Как ввести остаток топлива на конец дня?</b>",
-            reply_markup=get_fuel_end_keyboard()
-        )
-    else:
-        await state.update_data(
-            fuel_actual=fuel_actual,
-            fuel_end=fuel_end,
-            fuel_end_manual=0
-        )
-        
-        await save_and_show_waybill(message, state)
+    await message.answer(
+        f"🚗 <b>Автомобиль:</b> {data.get('vehicle_number')}\n\n"
+        "⛽ <b>Как ввести остаток топлива на конец дня?</b>\n"
+        "• 📊 Рассчитать автоматически - из начального топлива вычесть расход\n"
+        "• ✏️ Ввести остаток вручную\n"
+        "• ⛽ Добавить заправку",
+        reply_markup=get_fuel_end_keyboard()
+    )
+    await state.set_state(WaybillStates.fuel_end_choice)
+# ===================================================
 
 @router.message(WaybillStates.fuel_end_choice)
 async def waybill_fuel_end_choice(message: Message, state: FSMContext):
@@ -1766,7 +1758,7 @@ async def waybill_fuel_end_choice(message: Message, state: FSMContext):
         overuse = data.get('overuse', 0)
         economy = data.get('economy', 0)
         
-        # Расчет фактического расхода
+        # Расчет фактического расхода (можно использовать ранее сохранённый, но пересчитаем для надёжности)
         fuel_actual = round(fuel_norm + overuse - economy, 3)
         
         # Расчет остатка
